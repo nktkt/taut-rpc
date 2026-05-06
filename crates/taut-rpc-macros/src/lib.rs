@@ -4,7 +4,7 @@
 //! `taut-rpc` and import the macros via its re-exports rather than depending on
 //! this crate directly.
 //!
-//! Two macros are provided in Phase 1:
+//! Three macros are provided through Phase 2:
 //!
 //! - `#[rpc]` — attribute macro applied to a free `async fn` (queries and
 //!   mutations only in Phase 1; `#[rpc(stream)]` lands in Phase 3). Supports
@@ -14,12 +14,16 @@
 //!   the codegen step can emit a corresponding TypeScript definition. Works on
 //!   structs (named, tuple, unit) and enums (unit, tuple, struct variants).
 //!   See SPEC §3 (type mapping).
+//! - `#[derive(TautError)]` — derive macro that supplies the `TautError`
+//!   trait impl (per-variant `code()` and `http_status()`) for an enum. See
+//!   SPEC §3.3 (errors).
 //!
-//! Both macros report errors via `syn::Error::into_compile_error` so failures
+//! All macros report errors via `syn::Error::into_compile_error` so failures
 //! surface as compiler diagnostics rather than panics.
 
 use proc_macro::TokenStream;
 
+mod derive_taut_error;
 mod derive_type;
 mod rpc_attr;
 
@@ -41,6 +45,17 @@ pub fn rpc(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_derive(Type, attributes(taut))]
 pub fn derive_type(input: TokenStream) -> TokenStream {
     derive_type::expand(input.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Derives `taut-rpc`'s `TautError` trait for an enum, supplying `code()`
+/// (default: variant name in snake_case) and `http_status()` (default: 400)
+/// per variant. Both can be overridden via `#[taut(code = "...", status =
+/// 401)]`. See SPEC §3.3.
+#[proc_macro_derive(TautError, attributes(taut))]
+pub fn derive_taut_error(input: TokenStream) -> TokenStream {
+    derive_taut_error::expand(input.into())
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }

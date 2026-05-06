@@ -235,20 +235,20 @@ async fn router_serves_typed_mutation_with_input_struct() {
 // (g) Handler errors surface as a SPEC §4.1 error envelope.
 // ---------------------------------------------------------------------------
 
-/// A user-defined error whose serialized form has the `code` field the macro
-/// surfaces to the wire envelope.
-#[derive(Type, Serialize, Deserialize)]
+/// A user-defined error type. With `#[derive(TautError)]` the macro picks the
+/// per-variant `code` (snake_case'd) and the default HTTP status (400).
+#[derive(serde::Serialize, taut_rpc::Type, taut_rpc::TautError, Debug)]
 #[serde(tag = "code", content = "payload", rename_all = "snake_case")]
 #[allow(dead_code)]
 enum MyErr {
-    Boom { detail: String },
+    Boom { reason: String },
 }
 
 #[rpc]
 #[allow(clippy::unnecessary_wraps)]
 async fn fails() -> Result<i32, MyErr> {
     Err(MyErr::Boom {
-        detail: "something exploded".to_string(),
+        reason: "test".into(),
     })
 }
 
@@ -268,20 +268,72 @@ async fn router_returns_error_envelope_on_handler_error() {
         .await
         .unwrap();
 
-    // The macro surfaces handler errors with HTTP 400 by default.
-    assert!(
-        response.status().is_client_error(),
-        "expected 4xx, got {}",
-        response.status()
-    );
+    // Default HTTP status from `TautError::http_status` is 400.
+    assert_eq!(response.status(), http::StatusCode::BAD_REQUEST);
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(v["err"]["code"], serde_json::json!("boom"));
-    // Payload survives — this exact shape comes from the `#[serde(tag, content)]`
-    // wrapping plus the macro's pass-through of the serialized error value.
-    assert!(v["err"]["payload"].is_object() || v["err"]["payload"].is_string() || v["err"]["payload"].is_null());
+    // The wire envelope's `code` comes from `<MyErr as TautError>::code()`.
+    // The `payload` is the full serde serialization of the error value, so
+    // when the user opts into `#[serde(tag = "code", content = "payload")]`
+    // the payload itself nests `{code, payload}`. This is documented; users
+    // who don't want nesting should serialize their error types without that
+    // serde shape.
+    assert_eq!(
+        v,
+        serde_json::json!({
+            "err": {
+                "code": "boom",
+                "payload": { "code": "boom", "payload": { "reason": "test" } }
+            }
+        })
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (g2) Per-variant `#[taut(status = ...)]` overrides flow through to the HTTP
+//      response status, not just to the body.
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize, taut_rpc::Type, taut_rpc::TautError, Debug)]
+#[serde(tag = "code", content = "payload", rename_all = "snake_case")]
+#[allow(dead_code)]
+enum AuthErr {
+    #[taut(status = 401)]
+    Unauthenticated,
+}
+
+#[rpc]
+#[allow(clippy::unnecessary_wraps)]
+async fn protected() -> Result<(), AuthErr> {
+    Err(AuthErr::Unauthenticated)
+}
+
+#[tokio::test]
+async fn router_uses_taut_error_http_status_override() {
+    let app = Router::new().procedure(__taut_proc_protected()).into_axum();
+
+    let response = app
+        .oneshot(
+            HttpRequest::builder()
+                .method("POST")
+                .uri("/rpc/protected")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"input":null}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // The `#[taut(status = 401)]` annotation on the variant must propagate
+    // all the way out to the HTTP status — not just appear in the body.
+    assert_eq!(response.status(), http::StatusCode::UNAUTHORIZED);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(v["err"]["code"], serde_json::json!("unauthenticated"));
 }
 
 // ---------------------------------------------------------------------------

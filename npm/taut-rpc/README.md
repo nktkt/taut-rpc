@@ -63,6 +63,11 @@ and gated by an `ir_version` field; mismatches are refused by codegen.
 
 ## Changelog
 
+## 0.0.0 — Phase 2
+
+- `assertTautError` and `errorMatch` helpers for narrower catch ergonomics.
+- `isTautError` gained payload-narrowing overloads.
+
 - **Phase 1** — `createApi`-friendly surface for codegen-emitted `api.gen.ts`:
   re-exports `TautError` from the package root, adds the `isTautError(err,
   code?)` type-guard for typed `catch` handlers, and accepts an optional

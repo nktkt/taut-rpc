@@ -66,13 +66,28 @@ The IR (intermediate representation) is the contract between macro-time and code
 
 ### 3.3 Errors
 
-A `#[rpc]` function returns `Result<T, E>` where `E: TautError`. `TautError` requires `code: &'static str` plus a `Serialize` payload. The TS side gets:
+A `#[rpc]` function returns `Result<T, E>` where `E: TautError`. `TautError` requires `code: &'static str` plus a `Serialize` payload, and an `http_status() -> u16` mapping to the response status. The TS side gets:
 
 ```ts
 type ApiError<C extends string, P> = { code: C, payload: P };
 ```
 
 Per-procedure error unions are narrowed; clients don't need to handle errors a procedure can't emit.
+
+The canonical user-facing pattern is `#[derive(TautError)]` on a serde-tagged enum:
+
+```rust
+#[derive(serde::Serialize, taut_rpc::TautError, Debug)]
+#[serde(tag = "code", content = "payload", rename_all = "snake_case")]
+pub enum AddError {
+    #[taut(status = 400)] Overflow,
+    #[taut(status = 401)] Unauthenticated,
+}
+```
+
+The derive emits `impl TautError` whose `code()` returns the snake_case'd variant name and whose `http_status()` defaults to `400`. Per-variant `#[taut(code = "...", status = N)]` attributes override either default; the `code` override also replaces the wire discriminant the serde tag sees, so the two stay in sync.
+
+`StandardError` is the curated built-in covering common HTTP-mapped errors: `BadRequest` (400), `Unauthenticated` (401), `Forbidden` (403), `NotFound` (404), `Conflict` (409), `UnprocessableEntity` (422), `TooManyRequests` (429), `Internal` (500), `ServiceUnavailable` (503), `Timeout` (504). Use it directly for procedures that don't need a bespoke error union.
 
 ## 4. Wire format (v0)
 
@@ -121,6 +136,18 @@ let app: axum::Router = Router::new()
 
 Middleware: standard `tower::Layer`s. Auth and tracing reuse axum's ecosystem rather than reinventing.
 
+`Router::layer<L>(layer)` wraps the `axum::Router` produced by `into_axum()` with any `L: tower::Layer<axum::routing::Route>` (the same bound `axum::Router::layer` accepts). Layers compose in onion order: the outermost call wraps the previous result, so the layer added last sees the request first.
+
+```rust
+let app = Router::new()
+    .procedure(__taut_proc_ping())
+    .layer(tower_http::trace::TraceLayer::new_for_http())
+    .layer(axum::middleware::from_fn(auth))
+    .into_axum();
+```
+
+Here `auth` runs first on the inbound path (it was added last), then `TraceLayer`, then the procedure handler. Reverse the calls to swap the order.
+
 ## 6. Client API (generated)
 
 ```ts
@@ -146,9 +173,16 @@ Constraints supported in 0.1: `min`, `max`, `length`, `pattern`, `email`, `url`.
 - **Streaming uploads.** Multipart vs. chunked SSE-from-client? Likely defer to 0.2.
 - **Sum types in TS.** `tag = "type"` collides with user fields named `type` — needs an escape hatch.
 - **Generic procedures.** Allow `#[rpc] async fn list<T>(...)`? Almost certainly no in 0.1; force monomorphic wrappers.
-- **Authentication contract.** Should errors carry an `unauthenticated` discriminant by convention? Lean yes.
 
-### Resolved during Phase 0/1
+### Resolved during Phase 0/1/2
+
+- **Authentication contract.** *Decided in Phase 2.* `StandardError::Unauthenticated`
+  (HTTP 401, code `"unauthenticated"`) is the convention for "no credentials /
+  bad credentials". Per-procedure auth is expressed by adding an
+  `Unauthenticated` variant to a `#[derive(TautError)]` enum:
+  `enum E { #[taut(status = 401)] Unauthenticated, ... }`. The discriminant
+  name is normative — TS clients can branch on `err.code === "unauthenticated"`
+  uniformly across procedures.
 
 - **JsonRejection handling.** *Decided.* The Phase 1 `Router` catches axum's
   `JsonRejection` and re-emits the SPEC error envelope with
@@ -182,7 +216,17 @@ land in later phases):
   - structs: named, tuple, newtype, unit;
   - enums: unit variants, tuple variants, struct variants.
 - `cargo taut gen` codegen, emitting one `api.gen.ts` per project.
-- **Stateless server only.** axum's `State<S>` extractor is **not** supported
-  in v0.1; procedures are free functions whose state must be reached via
-  `OnceCell`/`static` for now. Stateful handlers land alongside Phase 2
-  middleware.
+- `#[derive(TautError)]` macro (Phase 2): **shipping in v0.1**. Emits
+  `impl TautError` with `code()` and `http_status()`, with per-variant
+  `#[taut(code = "...", status = N)]` overrides.
+- Per-procedure error type narrowing in codegen (Phase 2): **shipping in
+  v0.1**. The CLI emits `Proc_<name>_Error` type aliases per procedure (when
+  the procedure returns `Result<_, E>` with a non-empty error union) so the
+  TS client narrows `err.payload` on a `switch (err.code)`.
+- `Router::layer<L>(layer)` for `tower::Layer<axum::routing::Route>` (Phase 2):
+  **shipping in v0.1**. Composes axum's standard middleware ecosystem.
+- **State extractor support: still deferred.** axum's `State<S>` extractor is
+  **not** supported in v0.1; procedures are free functions whose state must
+  be reached via `OnceCell`/`static` for now. Planned for **Phase 5 or
+  later**; the current Phase 2 middleware story (`Router::layer`,
+  `tower::Layer`-based auth) covers the common needs in the meantime.

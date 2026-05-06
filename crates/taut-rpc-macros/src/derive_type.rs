@@ -33,7 +33,7 @@ use quote::{quote, quote_spanned, ToTokens};
 use syn::spanned::Spanned;
 use syn::{
     parse2, Attribute, Data, DataEnum, DataStruct, DeriveInput, Expr, ExprLit, Field as SynField,
-    Fields, Lit, LitStr, Meta, Variant as SynVariant,
+    Fields, Lit, LitStr, Meta, Token, Variant as SynVariant,
 };
 
 pub(crate) fn expand(input: TokenStream) -> syn::Result<TokenStream> {
@@ -332,10 +332,16 @@ impl TypeAttrs {
                     let s: LitStr = meta.value()?.parse()?;
                     out.tag = Some(s.value());
                     Ok(())
+                } else if meta.path.is_ident("code") || meta.path.is_ident("status") {
+                    // Owned by `#[derive(TautError)]`; consume any value and skip.
+                    if meta.input.peek(Token![=]) {
+                        let _: syn::Expr = meta.value()?.parse()?;
+                    }
+                    Ok(())
                 } else {
                     let key = path_to_string(&meta.path);
                     Err(meta.error(format!(
-                        "unknown taut attribute key: {key}; supported keys are rename, tag, optional, undefined"
+                        "unknown taut attribute key: {key}; supported keys are rename, tag, optional, undefined, code, status"
                     )))
                 }
             })?;
@@ -369,10 +375,16 @@ impl FieldAttrs {
                 } else if meta.path.is_ident("undefined") {
                     out.undefined = true;
                     Ok(())
+                } else if meta.path.is_ident("code") || meta.path.is_ident("status") {
+                    // Owned by `#[derive(TautError)]`; consume any value and skip.
+                    if meta.input.peek(Token![=]) {
+                        let _: syn::Expr = meta.value()?.parse()?;
+                    }
+                    Ok(())
                 } else {
                     let key = path_to_string(&meta.path);
                     Err(meta.error(format!(
-                        "unknown taut attribute key: {key}; supported keys are rename, tag, optional, undefined"
+                        "unknown taut attribute key: {key}; supported keys are rename, tag, optional, undefined, code, status"
                     )))
                 }
             })?;
@@ -399,10 +411,16 @@ impl VariantAttrs {
                     let s: LitStr = meta.value()?.parse()?;
                     out.rename = Some(s.value());
                     Ok(())
+                } else if meta.path.is_ident("code") || meta.path.is_ident("status") {
+                    // Owned by `#[derive(TautError)]`; consume any value and skip.
+                    if meta.input.peek(Token![=]) {
+                        let _: syn::Expr = meta.value()?.parse()?;
+                    }
+                    Ok(())
                 } else {
                     let key = path_to_string(&meta.path);
                     Err(meta.error(format!(
-                        "unknown taut attribute key: {key}; supported keys are rename, tag, optional, undefined"
+                        "unknown taut attribute key: {key}; supported keys are rename, tag, optional, undefined, code, status"
                     )))
                 }
             })?;

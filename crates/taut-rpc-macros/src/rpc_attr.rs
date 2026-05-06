@@ -29,6 +29,10 @@
 //! `Result` case `E` is recorded in the IR as a procedure-level error type so
 //! the generated TS client can narrow per-procedure error unions.
 //!
+//! Error types in `Result<T, E>` returns must implement `taut_rpc::TautError`
+//! (use `#[derive(TautError)]`). The macro doesn't add an explicit
+//! where-clause; the trait bound is enforced when the trait methods are called.
+//!
 //! Errors are surfaced via `syn::Error`; the macro never panics on user input.
 
 use proc_macro2::{Span, TokenStream};
@@ -343,29 +347,20 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
                         payload: ::serde_json::json!({ "message": __e.to_string() }),
                     },
                 },
-                ::std::result::Result::Err(__err) => match ::serde_json::to_value(&__err) {
-                    ::std::result::Result::Ok(__payload) => {
-                        // If the serialised error is a tagged object with a
-                        // `code` field, surface it to the client; otherwise
-                        // fall back to a generic discriminant. The TS side
-                        // narrows on `code` regardless, so this only affects
-                        // unexpected error shapes.
-                        let __code = __payload
-                            .get("code")
-                            .and_then(|c| c.as_str())
-                            .unwrap_or("error")
-                            .to_string();
-                        ::taut_rpc::ProcedureResult::Err {
-                            http_status: 400,
-                            code: __code,
-                            payload: __payload,
-                        }
+                ::std::result::Result::Err(__err) => {
+                    // The bound `E: ::taut_rpc::TautError` is enforced
+                    // implicitly by these method calls — without
+                    // `#[derive(TautError)]` (or a hand-written impl) on `E`
+                    // the user gets a "trait not satisfied" compile error.
+                    let __code = ::taut_rpc::TautError::code(&__err).to_string();
+                    let __http_status = ::taut_rpc::TautError::http_status(&__err);
+                    let __payload = ::serde_json::to_value(&__err)
+                        .unwrap_or(::serde_json::Value::Null);
+                    ::taut_rpc::ProcedureResult::Err {
+                        http_status: __http_status,
+                        code: __code,
+                        payload: __payload,
                     }
-                    ::std::result::Result::Err(__e) => ::taut_rpc::ProcedureResult::Err {
-                        http_status: 500,
-                        code: ::std::string::String::from("serialization_error"),
-                        payload: ::serde_json::json!({ "message": __e.to_string() }),
-                    },
                 },
             }
         }
@@ -646,5 +641,36 @@ mod tests {
         assert!(out.contains("__taut_proc_ping"));
         assert!(out.contains("ProcedureDescriptor"));
         assert!(out.contains("ProcKindRuntime :: Query"));
+    }
+
+    #[test]
+    fn expand_result_fn_uses_taut_error_trait_methods() {
+        // For a `Result<T, E>`-returning fn, the emitted handler must obtain
+        // the wire `code` and `http_status` through the `TautError` trait
+        // rather than by poking at the serialized payload.
+        let item = quote! {
+            async fn fails() -> Result<i32, MyErr> { todo!() }
+        };
+        let out = expand(quote!(), item).unwrap().to_string();
+        assert!(
+            out.contains("TautError :: code (& __err)"),
+            "expected TautError::code(&__err) call in emitted tokens, got: {out}"
+        );
+        assert!(
+            out.contains("TautError :: http_status (& __err)"),
+            "expected TautError::http_status(&__err) call in emitted tokens, got: {out}"
+        );
+        // The Phase 1 hack (poking the serialized payload's `"code"` field)
+        // must be gone.
+        assert!(
+            !out.contains(". get (\"code\")"),
+            "expected the JSON-poking `__payload.get(\"code\")` lookup to be removed, got: {out}"
+        );
+        // And the Phase 1 fallback `"error"` discriminant must be gone too,
+        // since the trait method always supplies a real code.
+        assert!(
+            !out.contains("unwrap_or (\"error\")"),
+            "expected the `unwrap_or(\"error\")` fallback to be removed, got: {out}"
+        );
     }
 }

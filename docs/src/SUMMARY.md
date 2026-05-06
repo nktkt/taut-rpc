@@ -12,8 +12,9 @@
 
 # Guides
 - [Getting started](./guides/getting-started.md)
-- [Subscriptions](./guides/subscriptions.md)
 - [Authentication](./guides/auth.md)
+- [Middleware](./guides/middleware.md)
+- [Subscriptions](./guides/subscriptions.md)
 
 # Reference
 - [SPEC.md](./reference/spec.md)

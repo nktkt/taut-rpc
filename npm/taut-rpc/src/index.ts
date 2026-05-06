@@ -270,39 +270,136 @@ export { HttpTransport, TautError } from "./http.js";
 export { SseTransport } from "./sse.js";
 
 // ---------------------------------------------------------------------------
-// Typed-error narrowing helper
+// Error narrowing helpers
 // ---------------------------------------------------------------------------
 
 import { TautError as _TautError } from "./http.js";
 
 /**
- * Type-guard that narrows `unknown` to {@link TautError}, optionally also
- * matching a specific error code. Useful in `catch` blocks where the value
- * is `unknown`:
+ * Type-guard that narrows `unknown` to {@link TautError} with no code
+ * constraint. Useful in `catch` blocks when you just need to distinguish
+ * RPC errors from arbitrary thrown values.
+ */
+export function isTautError(err: unknown): err is _TautError<string, unknown>;
+/**
+ * Type-guard that narrows `unknown` to {@link TautError} with a specific
+ * `code`. The payload remains `unknown` — pass an explicit second type
+ * parameter to also narrow `.payload`.
  *
  * ```ts
- * try {
- *   await api.users.get({ id: 1 });
- * } catch (err) {
- *   if (isTautError(err, "not_found")) {
- *     //          ^? TautError<"not_found", unknown>
- *     console.warn("missing:", err.payload);
- *   } else {
- *     throw err;
- *   }
+ * if (isTautError(err, "not_found")) {
+ *   //          ^? TautError<"not_found", unknown>
+ *   console.warn("missing:", err.payload);
  * }
  * ```
- *
- * Generated `api.gen.ts` callers can compose this with the procedure's
- * declared error type to recover the typed payload.
  */
 export function isTautError<C extends string>(
   err: unknown,
-  code?: C,
-): err is _TautError<C, unknown> {
+  code: C,
+): err is _TautError<C, unknown>;
+/**
+ * Type-guard that narrows `unknown` to {@link TautError} with both a
+ * specific `code` and a caller-supplied payload type. The payload type
+ * is purely a static assertion — there is no runtime check on its shape;
+ * trust comes from the procedure's declared error type in `api.gen.ts`.
+ *
+ * ```ts
+ * type NotFoundPayload = { id: number };
+ * if (isTautError<"not_found", NotFoundPayload>(err, "not_found")) {
+ *   //          ^? TautError<"not_found", NotFoundPayload>
+ *   console.warn("missing id:", err.payload.id);
+ * }
+ * ```
+ */
+export function isTautError<C extends string, P>(
+  err: unknown,
+  code: C,
+): err is _TautError<C, P>;
+export function isTautError(
+  err: unknown,
+  code?: string,
+): err is _TautError<string, unknown> {
   if (!(err instanceof _TautError)) return false;
   if (code !== undefined && err.code !== code) return false;
   return true;
+}
+
+/**
+ * Assert that `err` is a {@link TautError}, otherwise re-throw it. Useful
+ * inside `catch` blocks where any non-RPC error should propagate unchanged:
+ *
+ * ```ts
+ * try {
+ *   await client.add({ a, b });
+ * } catch (e) {
+ *   assertTautError(e);
+ *   //              ^ after this line, e is TautError<string, unknown>
+ *   logger.warn(e.code, e.payload);
+ * }
+ * ```
+ */
+export function assertTautError(
+  err: unknown,
+): asserts err is _TautError<string, unknown>;
+/**
+ * Assert that `err` is a {@link TautError} with a specific `code`. Any
+ * other thrown value — including a `TautError` with a different code —
+ * is re-thrown unchanged.
+ *
+ * ```ts
+ * try {
+ *   await client.users.get({ id });
+ * } catch (e) {
+ *   assertTautError(e, "not_found");
+ *   //              ^ after this line, e is TautError<"not_found", unknown>
+ * }
+ * ```
+ */
+export function assertTautError<C extends string>(
+  err: unknown,
+  code: C,
+): asserts err is _TautError<C, unknown>;
+export function assertTautError(err: unknown, code?: string): void {
+  if (!(err instanceof _TautError)) throw err;
+  if (code !== undefined && err.code !== code) throw err;
+}
+
+/**
+ * Pattern-match on a {@link TautError} by code. Returns the value of the
+ * matched arm, or `defaultArm(err)` if no arm matched and a default was
+ * supplied. Non-`TautError` values propagate unchanged; an unmatched
+ * `TautError` with no `defaultArm` is also re-thrown.
+ *
+ * The generic `E` should be the procedure's declared error union (e.g.
+ * `Proc_add_Error` from `api.gen.ts`). The `arms` object is exhaustive
+ * over `E["code"]` — adding a new server-side code becomes a compile error
+ * at every call site.
+ *
+ * ```ts
+ * try {
+ *   await client.add({ a, b });
+ * } catch (e) {
+ *   errorMatch<Proc_add_Error, void>(e, {
+ *     overflow: () => console.log("overflow"),
+ *     underflow: () => console.log("underflow"),
+ *   });
+ * }
+ * ```
+ */
+export function errorMatch<E extends _TautError<string, unknown>, R>(
+  err: unknown,
+  arms: { [K in E["code"]]: (e: Extract<E, { code: K }>) => R },
+  defaultArm?: (err: _TautError<string, unknown>) => R,
+): R {
+  if (!(err instanceof _TautError)) throw err;
+  const lookup = arms as unknown as Record<
+    string,
+    (e: _TautError<string, unknown>) => R
+  >;
+  const handler = lookup[err.code];
+  if (handler) return handler(err);
+  if (defaultArm) return defaultArm(err);
+  throw err;
 }
 
 // ---------------------------------------------------------------------------
@@ -354,6 +451,73 @@ export function isTautError<C extends string>(
 //       const c = createClient<any>({ url: "/rpc", transport: fakeTransport });
 //       await (c as any).ping();
 //       expect(fakeTransport.call).toHaveBeenCalledWith("ping", "query", undefined);
+//     });
+//   });
+//
+//   describe("error narrowing helpers", () => {
+//     it("isTautError() with no args narrows to TautError", () => {
+//       const e: unknown = new _TautError("boom", { reason: "x" }, 500);
+//       expect(isTautError(e)).toBe(true);
+//       expect(isTautError(new Error("plain"))).toBe(false);
+//       expect(isTautError("string error")).toBe(false);
+//     });
+//
+//     it("isTautError(err, code) matches only the given code", () => {
+//       const overflow: unknown = new _TautError("overflow", null, 400);
+//       const underflow: unknown = new _TautError("underflow", null, 400);
+//       expect(isTautError(overflow, "overflow")).toBe(true);
+//       expect(isTautError(underflow, "overflow")).toBe(false);
+//     });
+//
+//     it("isTautError<C, P> narrows payload statically", () => {
+//       type NotFoundPayload = { id: number };
+//       const e: unknown = new _TautError("not_found", { id: 7 }, 404);
+//       if (isTautError<"not_found", NotFoundPayload>(e, "not_found")) {
+//         // Type-level: e.payload is NotFoundPayload here.
+//         expect(e.payload.id).toBe(7);
+//       } else {
+//         throw new Error("expected narrowing to succeed");
+//       }
+//     });
+//
+//     it("assertTautError throws on non-TautError values", () => {
+//       const plain = new Error("plain");
+//       expect(() => assertTautError(plain)).toThrow(plain);
+//       expect(() => assertTautError("not an error")).toThrow();
+//       const taut = new _TautError("ok_code", null, 400);
+//       expect(() => assertTautError(taut)).not.toThrow();
+//       // With a code, mismatched codes re-throw.
+//       expect(() => assertTautError(taut, "other_code")).toThrow(taut);
+//     });
+//
+//     it("errorMatch dispatches to the matching arm and re-throws others", () => {
+//       type AddErr =
+//         | _TautError<"overflow", null>
+//         | _TautError<"underflow", null>;
+//       const overflow: unknown = new _TautError("overflow", null, 400);
+//       const result = errorMatch<AddErr, string>(overflow, {
+//         overflow: () => "hi-overflow",
+//         underflow: () => "hi-underflow",
+//       });
+//       expect(result).toBe("hi-overflow");
+//
+//       // Unmatched code with no defaultArm re-throws.
+//       const other: unknown = new _TautError("other", null, 400);
+//       expect(() =>
+//         errorMatch<AddErr, string>(other as any, {
+//           overflow: () => "hi-overflow",
+//           underflow: () => "hi-underflow",
+//         }),
+//       ).toThrow();
+//
+//       // Non-TautError propagates unchanged.
+//       const plain = new Error("plain");
+//       expect(() =>
+//         errorMatch<AddErr, string>(plain, {
+//           overflow: () => "hi-overflow",
+//           underflow: () => "hi-underflow",
+//         }),
+//       ).toThrow(plain);
 //     });
 //   });
 // }

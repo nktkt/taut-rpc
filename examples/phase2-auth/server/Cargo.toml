@@ -1,0 +1,20 @@
+[package]
+name = "phase2-auth-server"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# This package lives outside the workspace (examples are listed in the root
+# Cargo.toml's `exclude`). All dependencies are pinned with explicit versions
+# rather than `workspace = true` for that reason; only the two intra-repo
+# crates are referenced via `path`.
+[dependencies]
+taut-rpc = { path = "../../../crates/taut-rpc" }
+taut-rpc-macros = { path = "../../../crates/taut-rpc-macros" }
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+tower-http = { version = "0.5", features = ["cors"] }
+tower = { version = "0.5", features = ["util"] }

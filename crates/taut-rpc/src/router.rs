@@ -47,6 +47,22 @@ pub enum ProcKindRuntime {
     Subscription,
 }
 
+/// Type-erased adapter for a pending `tower::Layer`.
+///
+/// We can't store the `L` type on `Router` directly without making `Router`
+/// generic over every layer the user composes — which would also make
+/// `.layer()` change the type at every call (`Router<A> → Router<(B, A)>`),
+/// killing the chainable builder ergonomics SPEC §5 wants.
+///
+/// Instead we capture the layer in a closure that knows how to apply itself
+/// to an `axum::Router`, and erase its concrete type behind a trait object.
+/// We use `FnMut` rather than `FnOnce` because `Box<dyn FnOnce>` is awkward
+/// to call through (you can't move out of a `Box<dyn FnOnce>` on stable
+/// without `unsized_fn_params` gymnastics). Each closure is invoked exactly
+/// once at `into_axum()` time via [`Vec::drain`], so the FnMut/FnOnce
+/// distinction is purely a calling-convention workaround.
+type LayerApply = Box<dyn FnMut(AxumRouter) -> AxumRouter + Send + Sync>;
+
 /// Registration table for `#[rpc]` procedures, mountable as an `axum::Router`.
 ///
 /// The router is intentionally stateless in Phase 1 — Phase 2+ will reintroduce
@@ -56,6 +72,10 @@ pub enum ProcKindRuntime {
 #[derive(Default)]
 pub struct Router {
     procedures: Vec<ProcedureDescriptor>,
+    /// Pending `tower::Layer` applications, recorded by [`Router::layer`] and
+    /// folded over the built `axum::Router` at [`Router::into_axum`] time.
+    /// Stored in call order — see `layer`'s docs for composition semantics.
+    layers: Vec<LayerApply>,
 }
 
 impl Router {
@@ -64,6 +84,7 @@ impl Router {
     pub fn new() -> Self {
         Self {
             procedures: Vec::new(),
+            layers: Vec::new(),
         }
     }
 
@@ -85,6 +106,55 @@ impl Router {
             );
         }
         self.procedures.push(desc);
+        self
+    }
+
+    /// Wrap the resulting `axum::Router` with a `tower::Layer`.
+    ///
+    /// Recorded layers are folded over the built router at [`Router::into_axum`]
+    /// time, so you can keep registering procedures after a `.layer(...)` call —
+    /// the layer applies to *all* routes mounted by this `Router`, regardless of
+    /// the order in which procedures and layers were chained.
+    ///
+    /// # Composition order
+    ///
+    /// Layers compose in onion order: the **last** `.layer()` call is the
+    /// **outermost** wrap, matching `axum::Router::layer` and `tower`'s
+    /// convention. So:
+    ///
+    /// ```text
+    /// Router::new().layer(Inner).layer(Outer)
+    /// ```
+    ///
+    /// produces a stack where `Outer` sees the request first and the response
+    /// last — equivalent to `axum_router.layer(Inner).layer(Outer)`.
+    ///
+    /// See SPEC §5 — middleware reuses axum's ecosystem, so any
+    /// `tower::Layer` that works with `axum::Router::layer` works here.
+    #[must_use]
+    pub fn layer<L>(mut self, layer: L) -> Self
+    where
+        L: tower::Layer<axum::routing::Route> + Clone + Send + Sync + 'static,
+        L::Service: tower::Service<axum::http::Request<axum::body::Body>, Error = std::convert::Infallible>
+            + Clone
+            + Send
+            + 'static,
+        <L::Service as tower::Service<axum::http::Request<axum::body::Body>>>::Response:
+            axum::response::IntoResponse + 'static,
+        <L::Service as tower::Service<axum::http::Request<axum::body::Body>>>::Future: Send + 'static,
+    {
+        // The closure is wrapped in `Option<L>` so we can `take()` the layer
+        // out of it on first call — `axum::Router::layer` consumes the layer
+        // by value, but our adapter is `FnMut`, not `FnOnce`. In practice the
+        // closure is only ever called once (via `Vec::drain` in `into_axum`),
+        // so this is a no-op safety net rather than load-bearing logic.
+        let mut slot = Some(layer);
+        self.layers.push(Box::new(move |r: AxumRouter| {
+            let layer = slot
+                .take()
+                .expect("taut-rpc: layer adapter invoked more than once");
+            r.layer(layer)
+        }));
         self
     }
 
@@ -127,7 +197,7 @@ impl Router {
     /// Unknown routes fall through to a SPEC §4.1 envelope:
     /// `404 {"err": {"code": "not_found", "payload": {"procedure": "<name>"}}}`.
     #[must_use]
-    pub fn into_axum(self) -> AxumRouter {
+    pub fn into_axum(mut self) -> AxumRouter {
         // Capture the IR once up front so the `/rpc/_ir` handler can hand out
         // cheap clones of an `Arc<Ir>` rather than recomputing per-request.
         // The binding is only consumed under `cfg(feature = "ir-export")`, so
@@ -171,7 +241,7 @@ impl Router {
             );
         }
 
-        for desc in self.procedures {
+        for desc in std::mem::take(&mut self.procedures) {
             match desc.kind {
                 ProcKindRuntime::Query | ProcKindRuntime::Mutation => {
                     let handler = desc.handler.clone();
@@ -196,7 +266,24 @@ impl Router {
             }
         }
 
-        app.fallback(not_found_fallback)
+        // Install the SPEC §4.1 not_found fallback before applying user layers
+        // so middleware (logging, tracing, auth headers, ...) wraps the
+        // fallback path too — clients hitting unknown procedures should see
+        // the same observability as clients hitting real ones.
+        let mut router = app.fallback(not_found_fallback);
+
+        // Fold pending `tower::Layer`s in registration order. Because each
+        // `axum::Router::layer` call wraps the entire router as the new
+        // innermost service, applying layers in registration order means the
+        // last `.layer()` call ends up outermost — matching axum's own
+        // composition semantics, documented on `Router::layer` above.
+        //
+        // We `drain(..)` rather than iterate by reference so each closure can
+        // move its captured layer out on its single invocation.
+        for mut apply in self.layers.drain(..) {
+            router = apply(router);
+        }
+        router
     }
 }
 
@@ -561,5 +648,128 @@ mod tests {
         assert_eq!(ir.ir_version, crate::ir::Ir::CURRENT_VERSION);
         let names: Vec<&str> = ir.procedures.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, vec!["a", "b"]);
+    }
+
+    // ---- tower::Layer integration (Phase 2 — SPEC §5) ------------------
+
+    /// Apply a marker-stamping middleware to a [`Router`] under test.
+    ///
+    /// Stamps `x-taut-test: <marker>` on the response so the layer tests
+    /// below can prove (a) the layer was invoked at all, and (b) which layer
+    /// won when several stamp the same header. We pass `marker` as a `'static
+    /// str` to dodge naming the closure-and-future types that `from_fn`
+    /// bakes into its `FromFnLayer<...>` return type — those types are
+    /// unnameable in stable Rust without `impl Trait` in type aliases.
+    fn with_marker_layer(router: Router, marker: &'static str) -> Router {
+        router.layer(axum::middleware::from_fn(
+            move |req: axum::extract::Request, next: axum::middleware::Next| async move {
+                let mut resp = next.run(req).await;
+                resp.headers_mut()
+                    .insert("x-taut-test", marker.parse().unwrap());
+                resp
+            },
+        ))
+    }
+
+    #[tokio::test]
+    async fn router_with_no_layers_builds_unchanged() {
+        // Smoke: a router with zero `.layer()` calls still produces a working
+        // axum router — the layer machinery shouldn't perturb the no-middleware
+        // path. We hit `/rpc/_health` because it's the cheapest live route.
+        let app = Router::new().into_axum();
+
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/rpc/_health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        // No layers were registered, so no middleware-stamped headers should
+        // appear. This is what "unchanged" means in the test name.
+        assert!(response.headers().get("x-taut-test").is_none());
+    }
+
+    #[tokio::test]
+    async fn router_with_a_simple_layer_applies_it() {
+        // Exercises the happy path: register one procedure, wrap with one
+        // middleware that stamps a header, confirm the header survives the
+        // round trip. Proves `.layer()` actually plumbs through to the built
+        // axum::Router rather than being silently dropped.
+        let router = Router::new().procedure(make_descriptor(
+            "ping",
+            ProcKindRuntime::Query,
+            echo_handler(),
+        ));
+        let app = with_marker_layer(router, "hit").into_axum();
+
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/rpc/ping")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"input":null}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-taut-test")
+                .map(|v| v.to_str().unwrap()),
+            Some("hit"),
+        );
+    }
+
+    #[tokio::test]
+    async fn multiple_layers_compose_in_outer_first_order() {
+        // axum's `Router::layer` makes the *last* applied layer the outermost
+        // wrap, so its post-handler logic runs *last* on the response path.
+        // Two layers both setting the same response header therefore lets the
+        // outer layer overwrite the inner one — and that "winner" tells us
+        // which layer ran outermost.
+        //
+        // Registration:   .layer(inner).layer(outer)
+        // Onion:          outer( inner( handler ) )
+        // Header writes:  inner first, outer last  → outer wins.
+        let router = Router::new().procedure(make_descriptor(
+            "ping",
+            ProcKindRuntime::Query,
+            echo_handler(),
+        ));
+        let router = with_marker_layer(router, "inner");
+        let router = with_marker_layer(router, "outer");
+        let app = router.into_axum();
+
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/rpc/ping")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"input":null}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-taut-test")
+                .map(|v| v.to_str().unwrap()),
+            // The last `.layer()` call wins — that's the SPEC §5 contract,
+            // matching `axum::Router::layer` and `tower`'s own ordering.
+            Some("outer"),
+        );
     }
 }

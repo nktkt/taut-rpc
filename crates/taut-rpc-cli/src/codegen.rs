@@ -1,14 +1,23 @@
-//! TypeScript codegen for `cargo taut gen` (Phase 1).
+//! TypeScript codegen for `cargo taut gen` (Phase 1 + 2 error narrowing).
 //!
 //! Pure logic: takes an [`ir::Ir`] document and renders a single
 //! `api.gen.ts` source string. The CLI's `gen` subcommand owns the I/O and
 //! validator-flag parsing; this module owns the string-building.
 //!
-//! See `SPEC.md` §3 (type mapping) and §6 (client API). The shape of the
-//! generated client mirrors the runtime declarations in
-//! `npm/taut-rpc/src/index.ts` — every emitted procedure is a
-//! `ProcedureDef<I, O, E>`, and the final `Procedures` interface is what
-//! `createClient<Procedures>` consumes.
+//! See `SPEC.md` §3 (type mapping), §3.3/§4.1 (error envelope), and §6
+//! (client API). The shape of the generated client mirrors the runtime
+//! declarations in `npm/taut-rpc/src/index.ts` — every emitted procedure is
+//! a `ProcedureDef<I, O, E, Kind>`, and the final `Procedures` type map is
+//! what `createClient<Procedures>` consumes.
+//!
+//! Phase 2 additions:
+//! - For each procedure with a non-empty error set we also emit a
+//!   `Proc_<name>_Error` type alias right before its `ProcedureDef`. Callers
+//!   import this alias to drive `e.code` narrowing without touching `unknown`.
+//! - We emit a runtime `procedureKinds` const (`as const satisfies …`) so
+//!   `createClient` can dispatch query vs. mutation vs. subscription without
+//!   the caller having to thread the map manually. `createApi` defaults to
+//!   it but still lets users override via `opts.kinds`.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -74,6 +83,7 @@ pub fn render_ts_checked(ir: &Ir, opts: &CodegenOptions) -> Result<String, Strin
     write_types(&mut out, ir, &tm_opts)?;
     write_procedures(&mut out, ir, &tm_opts);
     write_procedures_map(&mut out, ir);
+    write_procedure_kinds(&mut out, ir);
     write_create_api(&mut out);
     write_validator_stub(&mut out, opts.validator);
 
@@ -279,7 +289,6 @@ fn write_procedure_alias(out: &mut String, p: &Procedure, tm_opts: &type_map::Op
     let alias = procedure_alias_name(&p.name);
     let input = type_map::render_type(&p.input, tm_opts);
     let output = type_map::render_type(&p.output, tm_opts);
-    let errors = render_error_union(&p.errors, tm_opts);
     let _ = writeln!(
         out,
         "// kind: {kind:?}, http: {method:?}, name: {name}",
@@ -287,6 +296,25 @@ fn write_procedure_alias(out: &mut String, p: &Procedure, tm_opts: &type_map::Op
         method = p.http_method,
         name = p.name,
     );
+
+    // Phase 2: emit a per-procedure error alias when the procedure has any
+    // declared errors, so callers can narrow on `.code` via the alias's
+    // discriminant. Procedures with no errors keep `never` as the third
+    // ProcedureDef type arg (same as Phase 1) and skip the alias entirely.
+    let error_arg = if p.errors.is_empty() {
+        "never".to_string()
+    } else {
+        let error_alias = procedure_error_alias_name(&p.name);
+        let union = render_error_union(&p.errors, tm_opts);
+        let _ = writeln!(
+            out,
+            "/** Wire-shape error union for procedure `{name}`. Narrow on `.code`. */",
+            name = p.name,
+        );
+        let _ = writeln!(out, "export type {error_alias} = {union};");
+        error_alias
+    };
+
     let kind_lit = match p.kind {
         taut_rpc::ir::ProcKind::Query => "\"query\"",
         taut_rpc::ir::ProcKind::Mutation => "\"mutation\"",
@@ -294,7 +322,7 @@ fn write_procedure_alias(out: &mut String, p: &Procedure, tm_opts: &type_map::Op
     };
     let _ = writeln!(
         out,
-        "export type {alias} = ProcedureDef<{input}, {output}, {errors}, {kind_lit}>;\n",
+        "export type {alias} = ProcedureDef<{input}, {output}, {error_arg}, {kind_lit}>;\n",
     );
 }
 
@@ -323,10 +351,34 @@ fn write_procedures_map(out: &mut String, ir: &Ir) {
     out.push_str("};\n\n");
 }
 
+fn write_procedure_kinds(out: &mut String, ir: &Ir) {
+    // Runtime-visible counterpart to the `Procedures` type map: the runtime
+    // dispatches query vs. mutation vs. subscription from this table.
+    // `as const satisfies …` pins each value to its narrow literal kind so
+    // callers reading `procedureKinds.foo` see `"query"` (not `string`).
+    out.push_str("/** Procedure name -> kind, for runtime dispatch. */\n");
+    out.push_str("export const procedureKinds = {\n");
+    for p in &ir.procedures {
+        let kind_lit = match p.kind {
+            taut_rpc::ir::ProcKind::Query => "\"query\"",
+            taut_rpc::ir::ProcKind::Mutation => "\"mutation\"",
+            taut_rpc::ir::ProcKind::Subscription => "\"subscription\"",
+        };
+        let _ = writeln!(
+            out,
+            "  {key}: {kind_lit},",
+            key = quoted(&p.name),
+        );
+    }
+    out.push_str(
+        "} as const satisfies Record<keyof Procedures, \"query\" | \"mutation\" | \"subscription\">;\n\n",
+    );
+}
+
 fn write_create_api(out: &mut String) {
     out.push_str("/** Construct a typed client for the procedures generated above. */\n");
     out.push_str("export function createApi(opts: ClientOptions): ClientOf<Procedures> {\n");
-    out.push_str("  return createClient<Procedures>(opts);\n");
+    out.push_str("  return createClient<Procedures>({ ...opts, kinds: opts.kinds ?? procedureKinds });\n");
     out.push_str("}\n");
 }
 
@@ -356,6 +408,14 @@ fn procedure_alias_name(proc_name: &str) -> String {
             s.push('_');
         }
     }
+    s
+}
+
+/// Companion to [`procedure_alias_name`] for the per-procedure error union
+/// alias. `"users.get"` → `"Proc_users_get_Error"`.
+fn procedure_error_alias_name(proc_name: &str) -> String {
+    let mut s = procedure_alias_name(proc_name);
+    s.push_str("_Error");
     s
 }
 
@@ -436,8 +496,16 @@ mod tests {
             "empty Procedures map missing:\n{s}"
         );
         assert!(
+            s.contains("export const procedureKinds = {\n} as const satisfies Record<keyof Procedures, \"query\" | \"mutation\" | \"subscription\">;"),
+            "empty procedureKinds missing:\n{s}"
+        );
+        assert!(
             s.contains("export function createApi(opts: ClientOptions): ClientOf<Procedures>"),
             "createApi missing:\n{s}"
+        );
+        assert!(
+            s.contains("createClient<Procedures>({ ...opts, kinds: opts.kinds ?? procedureKinds });"),
+            "createApi should thread procedureKinds through to createClient:\n{s}"
         );
     }
 
@@ -464,6 +532,16 @@ mod tests {
         assert!(
             s.contains("\"ping\": Proc_ping;"),
             "Procedures key wrong:\n{s}"
+        );
+        // Zero-error procedure -> no `_Error` alias emitted.
+        assert!(
+            !s.contains("Proc_ping_Error"),
+            "zero-error procedure must not emit error alias:\n{s}"
+        );
+        // procedureKinds runtime map should mention the procedure name -> kind.
+        assert!(
+            s.contains("\"ping\": \"query\","),
+            "procedureKinds entry missing:\n{s}"
         );
     }
 
@@ -694,9 +772,145 @@ mod tests {
             types: vec![],
         };
         let s = render_ts(&ir, &opts_no_validator());
+        // Phase 2: the alias is emitted before the ProcedureDef and the
+        // ProcedureDef's third type arg references the alias rather than
+        // the inline union.
         assert!(
-            s.contains("ProcedureDef<void, void, NotFound | Unauthorized,"),
-            "error union wrong:\n{s}"
+            s.contains("export type Proc_p_Error = NotFound | Unauthorized;"),
+            "per-procedure error alias missing:\n{s}"
+        );
+        assert!(
+            s.contains("export type Proc_p = ProcedureDef<void, void, Proc_p_Error, \"mutation\">;"),
+            "ProcedureDef should reference Proc_p_Error alias:\n{s}"
+        );
+        // Sanity: the alias must appear *before* the ProcedureDef so TS
+        // resolves the forward reference cleanly.
+        let alias_idx = s
+            .find("export type Proc_p_Error =")
+            .expect("alias present");
+        let def_idx = s
+            .find("export type Proc_p =")
+            .expect("def present");
+        assert!(alias_idx < def_idx, "alias must precede ProcedureDef:\n{s}");
+        // procedureKinds reflects the mutation kind for runtime dispatch.
+        assert!(
+            s.contains("\"p\": \"mutation\","),
+            "procedureKinds entry missing:\n{s}"
+        );
+    }
+
+    #[test]
+    fn single_error_emits_error_alias() {
+        let ir = Ir {
+            ir_version: Ir::CURRENT_VERSION,
+            procedures: vec![Procedure {
+                name: "add".to_string(),
+                kind: ProcKind::Query,
+                input: TypeRef::Primitive(Primitive::Unit),
+                output: TypeRef::Primitive(Primitive::U32),
+                errors: vec![TypeRef::Named("AddError".to_string())],
+                http_method: HttpMethod::Post,
+                doc: None,
+            }],
+            types: vec![],
+        };
+        let s = render_ts(&ir, &opts_no_validator());
+        assert!(
+            s.contains("export type Proc_add_Error = AddError;"),
+            "single-error alias missing:\n{s}"
+        );
+        assert!(
+            s.contains("export type Proc_add = ProcedureDef<void, number, Proc_add_Error, \"query\">;"),
+            "ProcedureDef must reference single-error alias:\n{s}"
+        );
+        // Doc comment on the alias mentions narrowing.
+        assert!(
+            s.contains("Wire-shape error union for procedure `add`. Narrow on `.code`."),
+            "alias doc comment missing or wrong:\n{s}"
+        );
+    }
+
+    #[test]
+    fn dotted_procedure_name_emits_dotted_error_alias() {
+        let ir = Ir {
+            ir_version: Ir::CURRENT_VERSION,
+            procedures: vec![Procedure {
+                name: "users.get".to_string(),
+                kind: ProcKind::Query,
+                input: TypeRef::Primitive(Primitive::U32),
+                output: TypeRef::Named("User".to_string()),
+                errors: vec![TypeRef::Named("NotFound".to_string())],
+                http_method: HttpMethod::Get,
+                doc: None,
+            }],
+            types: vec![],
+        };
+        let s = render_ts(&ir, &opts_no_validator());
+        assert!(
+            s.contains("export type Proc_users_get_Error = NotFound;"),
+            "dotted-name error alias missing:\n{s}"
+        );
+        assert!(
+            s.contains(
+                "export type Proc_users_get = ProcedureDef<number, User, Proc_users_get_Error, \"query\">;"
+            ),
+            "dotted-name ProcedureDef wrong:\n{s}"
+        );
+        assert_eq!(procedure_error_alias_name("users.get"), "Proc_users_get_Error");
+    }
+
+    #[test]
+    fn procedure_kinds_const_emitted_with_satisfies_clause() {
+        let ir = Ir {
+            ir_version: Ir::CURRENT_VERSION,
+            procedures: vec![
+                Procedure {
+                    name: "ping".to_string(),
+                    kind: ProcKind::Query,
+                    input: TypeRef::Primitive(Primitive::Unit),
+                    output: TypeRef::Primitive(Primitive::String),
+                    errors: vec![],
+                    http_method: HttpMethod::Post,
+                    doc: None,
+                },
+                Procedure {
+                    name: "do_thing".to_string(),
+                    kind: ProcKind::Mutation,
+                    input: TypeRef::Primitive(Primitive::Unit),
+                    output: TypeRef::Primitive(Primitive::Unit),
+                    errors: vec![],
+                    http_method: HttpMethod::Post,
+                    doc: None,
+                },
+                Procedure {
+                    name: "events".to_string(),
+                    kind: ProcKind::Subscription,
+                    input: TypeRef::Primitive(Primitive::Unit),
+                    output: TypeRef::Primitive(Primitive::String),
+                    errors: vec![],
+                    http_method: HttpMethod::Get,
+                    doc: None,
+                },
+            ],
+            types: vec![],
+        };
+        let s = render_ts(&ir, &opts_no_validator());
+        assert!(
+            s.contains("export const procedureKinds = {"),
+            "procedureKinds const missing:\n{s}"
+        );
+        assert!(s.contains("\"ping\": \"query\","), "ping entry:\n{s}");
+        assert!(
+            s.contains("\"do_thing\": \"mutation\","),
+            "do_thing entry:\n{s}"
+        );
+        assert!(
+            s.contains("\"events\": \"subscription\","),
+            "events entry:\n{s}"
+        );
+        assert!(
+            s.contains("} as const satisfies Record<keyof Procedures, \"query\" | \"mutation\" | \"subscription\">;"),
+            "as-const-satisfies tail missing:\n{s}"
         );
     }
 

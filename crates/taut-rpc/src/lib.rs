@@ -33,6 +33,6 @@ pub use types::TautType;
 pub use validate::{Constraint, Validate, ValidationError};
 pub use dump::{dump_if_requested, ir_json};
 
-pub use taut_rpc_macros::{rpc, Type};
+pub use taut_rpc_macros::{rpc, Type, TautError};
 
 pub const IR_VERSION: u32 = 0;

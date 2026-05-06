@@ -19,6 +19,41 @@ Each entry below MUST note an IR or wire bump if one happened.
 
 ---
 
+## [Unreleased] — Phase 2
+
+### Added
+- `#[derive(TautError)]` proc-macro: emits `impl TautError` with `code()` and `http_status()`.
+  Per-variant `#[taut(code = "...", status = N)]` overrides the default snake_case'd
+  variant name and the default 400 status.
+- `Router::layer<L>(layer)` builder method that wraps the `axum::Router` produced by
+  `into_axum()` with any `tower::Layer<axum::routing::Route>`.
+- `StandardError` gained 5 new variants: `BadRequest`, `Conflict`, `UnprocessableEntity`,
+  `ServiceUnavailable`, `Timeout`.
+- Codegen now emits a `Proc_<name>_Error` alias per procedure (when errors exist) and a
+  `procedureKinds` const map for runtime kind dispatch.
+- npm runtime: `assertTautError`, `errorMatch`, and richer `isTautError` overloads for
+  payload narrowing.
+- Phase 2 examples: `examples/phase2-auth/` and `examples/phase2-tracing/`.
+- Documentation: `docs/src/concepts/errors.md` and `docs/src/guides/auth.md` rewritten;
+  new `docs/src/guides/middleware.md` covering `tower::Layer` composition.
+
+### Changed
+- `#[rpc]` macro now uses `<E as TautError>::code()` / `http_status()` for the wire
+  envelope (was previously inspecting the serialized JSON for a top-level `code` field).
+  Error types in `Result<T, E>` returns now must implement `TautError` — use
+  `#[derive(TautError)]`.
+- npm `ProcedureDef` gained a 4th type param `K extends ProcedureKind` defaulted to the
+  full union, so codegen-emitted aliases pin the kind for tighter `ClientOf<P>` inference
+  (this landed in Phase 1 fixup but is recorded here for completeness).
+
+### IR
+- IR_VERSION still 0.
+
+### Wire
+- No change.
+
+---
+
 ## [Unreleased] — Phase 1
 
 ### Added

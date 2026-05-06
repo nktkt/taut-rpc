@@ -22,12 +22,12 @@ Target for the first stable release: **0.1.0**, scoped narrow on purpose. Anythi
 
 ## Phase 2 — Errors and middleware
 
-- [ ] `TautError` trait + `#[derive(TautError)]`.
-- [ ] Per-procedure error type narrowing in codegen.
-- [ ] axum `tower::Layer` integration documented (auth, tracing examples).
-- [ ] Decide: do we ship an `Unauthenticated` standard error code? (Tentative yes.)
+- [x] `TautError` trait + `#[derive(TautError)]`.
+- [x] Per-procedure error type narrowing in codegen.
+- [x] axum `tower::Layer` integration documented (auth, tracing examples).
+- [x] Decide: do we ship an `Unauthenticated` standard error code? (Tentative yes.)
 
-**Exit criteria:** Errors are typed end-to-end. The TS client can `switch` on `err.code` and the type system narrows the payload.
+**Exit criteria:** Errors are typed end-to-end. The TS client can `switch` on `err.code` and the type system narrows the payload. *(landed on main 2026-05-06)*
 
 ## Phase 3 — Subscriptions
 
