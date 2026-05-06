@@ -1,10 +1,10 @@
 # Rust
-/target
+target/
 **/*.rs.bk
 Cargo.lock
 
 # Generated artifacts
-/target/taut
+target/taut/
 *.gen.ts
 
 # Node (for examples)

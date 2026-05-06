@@ -48,15 +48,14 @@ export class HttpTransport implements Transport {
       ? `${baseUrl}/rpc/${encodeURIComponent(name)}?input=${encodeURIComponent(JSON.stringify(input))}`
       : `${baseUrl}/rpc/${encodeURIComponent(name)}`;
 
+    const ctrl = new AbortController();
+    const timer = this.opts.timeoutMs ? setTimeout(() => ctrl.abort(), this.opts.timeoutMs) : undefined;
     const init: RequestInit = {
       method,
       headers: { "content-type": "application/json", ...this.resolveHeaders() },
-      body: method === "GET" ? undefined : JSON.stringify({ input }),
+      signal: ctrl.signal,
+      ...(method === "GET" ? {} : { body: JSON.stringify({ input }) }),
     };
-
-    const ctrl = new AbortController();
-    const timer = this.opts.timeoutMs ? setTimeout(() => ctrl.abort(), this.opts.timeoutMs) : undefined;
-    init.signal = ctrl.signal;
 
     let resp: Response;
     try {
