@@ -1,0 +1,29 @@
+[package]
+name = "taut-rpc"
+version = "0.0.0"
+description = "End-to-end type-safe RPC between Rust and TypeScript"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "../../README.md"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+axum.workspace = true
+tokio.workspace = true
+tower.workspace = true
+futures.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+http.workspace = true
+bytes.workspace = true
+
+[dev-dependencies]
+tower = { workspace = true, features = ["util"] }
+
+[lints]
+workspace = true

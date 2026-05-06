@@ -1,0 +1,20 @@
+[book]
+authors = ["taut-rpc contributors"]
+language = "en"
+multilingual = false
+src = "src"
+title = "taut-rpc"
+
+[build]
+build-dir = "build"
+
+[output.html]
+git-repository-url = "https://github.com/nktkt/taut-rpc"
+edit-url-template = "https://github.com/nktkt/taut-rpc/edit/main/docs/{path}"
+default-theme = "navy"
+preferred-dark-theme = "navy"
+no-section-label = false
+
+[output.html.fold]
+enable = true
+level = 1

@@ -1,0 +1,3 @@
+# Specification
+
+{{#include ../../../SPEC.md}}

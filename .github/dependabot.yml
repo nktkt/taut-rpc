@@ -1,0 +1,21 @@
+# Dependabot configuration.
+#
+# Weekly updates for the Rust workspace, the npm client package, and our
+# GitHub Actions versions. Keeps drift small without flooding review queues.
+
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: npm
+    directory: /npm/taut-rpc
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

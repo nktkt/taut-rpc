@@ -1,0 +1,22 @@
+[package]
+name = "taut-rpc-cli"
+version = "0.0.0"
+description = "cargo subcommand for taut-rpc codegen"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "cargo-taut"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

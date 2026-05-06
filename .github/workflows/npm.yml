@@ -1,0 +1,55 @@
+# npm build CI for the taut-rpc TypeScript client.
+#
+# Only runs when files under npm/** or this workflow change. The lockfile may
+# not exist on Day 0, so the install step falls back to `npm install
+# --no-package-lock` when there is no package-lock.json.
+
+name: npm
+
+on:
+  pull_request:
+    paths:
+      - 'npm/**'
+      - '.github/workflows/npm.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'npm/**'
+      - '.github/workflows/npm.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    # TODO: drop continue-on-error once the npm package compiles cleanly.
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: npm/taut-rpc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          # Day 0: lockfile may not exist yet. Using just `cache: 'npm'` keeps
+          # this lint-clean without requiring a lockfile path. Once
+          # npm/taut-rpc/package-lock.json is committed, this still finds it.
+          cache: 'npm'
+      - name: Install deps
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install --no-package-lock
+          fi
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Build
+        run: npm run build

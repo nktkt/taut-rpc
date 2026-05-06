@@ -1,0 +1,48 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/taut-rpc",
+    "crates/taut-rpc-macros",
+    "crates/taut-rpc-cli",
+]
+exclude = [
+    "examples",
+    "npm",
+    "docs",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/nktkt/taut-rpc"
+authors = ["taut-rpc contributors"]
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+anyhow = "1"
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.5", features = ["trace", "cors"] }
+futures = "0.3"
+tracing = "0.1"
+async-trait = "0.1"
+http = "1"
+bytes = "1"
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "extra-traits"] }
+clap = { version = "4", features = ["derive"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"

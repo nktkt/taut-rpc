@@ -1,0 +1,73 @@
+# cargo-deny configuration. Run with `cargo deny check`.
+# See https://embarkstudios.github.io/cargo-deny/
+#
+# Reviewed/refreshed at v0.0.0 (Day-0 OSS). Sweep this file again before 0.1
+# to tighten policies (e.g. flip multiple-versions to "deny", trim license
+# allow-list, audit any accumulated `skip` / `ignore` entries).
+#
+# tested with cargo-deny 0.16
+
+[graph]
+all-features = false
+no-default-features = false
+exclude = []
+
+[output]
+feature-depth = 1
+
+# ---------------------------------------------------------------------------
+# Advisories: catch yanked or insecure dependencies via RustSec.
+# ---------------------------------------------------------------------------
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "warn"
+ignore = []
+
+# ---------------------------------------------------------------------------
+# Licenses: dual MIT OR Apache-2.0 for our own crates; tolerate common
+# permissive / weak-copyleft licenses for transitive deps. GPL-family
+# copyleft is rejected by omission from `allow` (cargo-deny denies anything
+# not on the allow-list).
+# ---------------------------------------------------------------------------
+[licenses]
+confidence-threshold = 0.93
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",
+    "0BSD",
+    "CC0-1.0",
+]
+exceptions = []
+
+# ---------------------------------------------------------------------------
+# Bans: warn on duplicate versions for now (Day-0 noise). Wildcards remain
+# denied — pin or use caret/tilde ranges instead.
+# ---------------------------------------------------------------------------
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+allow = []
+deny = []
+skip = []
+skip-tree = []
+
+# ---------------------------------------------------------------------------
+# Sources: only crates.io is fully trusted. Unknown registries / git remotes
+# warn rather than fail so contributors aren't blocked, but they show up in
+# review.
+# ---------------------------------------------------------------------------
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

@@ -1,0 +1,43 @@
+# mdBook documentation build.
+#
+# Only runs when files under docs/ (or this workflow) change. Uploads the
+# rendered book as a workflow artifact so reviewers can preview it.
+
+name: docs
+
+on:
+  pull_request:
+    paths:
+      - 'docs/**'
+      - '.github/workflows/docs.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - '.github/workflows/docs.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    # TODO: drop continue-on-error once the book renders without warnings.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: peaceiris/actions-mdbook@v2
+        with:
+          mdbook-version: 'latest'
+      - name: Build book
+        run: mdbook build docs
+      - name: Upload book artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mdbook-site
+          path: docs/book
