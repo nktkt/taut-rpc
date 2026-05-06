@@ -1,0 +1,21 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock
+
+# Generated artifacts
+/target/taut
+*.gen.ts
+
+# Node (for examples)
+node_modules
+dist
+.pnpm-store
+.turbo
+
+# Editor / OS
+.DS_Store
+.idea
+.vscode
+*.swp
+*.swo
