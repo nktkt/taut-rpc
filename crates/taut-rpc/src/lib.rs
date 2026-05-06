@@ -16,15 +16,23 @@
 //! the full design — wire format, type mapping, IR schema, and versioning rules.
 //! The [`IR_VERSION`] constant tracks SPEC §9.
 
-pub mod error;
 pub mod ir;
-pub mod router;
 pub mod type_map;
-pub mod validate;
 pub mod wire;
+pub mod error;
+pub mod router;
+pub mod validate;
+pub mod types;
+pub mod procedure;
+pub mod dump;
 
-pub use error::TautError;
-pub use router::Router;
-pub use validate::{Validate, ValidationError};
+pub use error::{StandardError, TautError};
+pub use procedure::{ProcedureDescriptor, ProcedureHandler, ProcedureResult};
+pub use router::{ProcKindRuntime, Router};
+pub use types::TautType;
+pub use validate::{Constraint, Validate, ValidationError};
+pub use dump::{dump_if_requested, ir_json};
+
+pub use taut_rpc_macros::{rpc, Type};
 
 pub const IR_VERSION: u32 = 0;

@@ -1,0 +1,5 @@
+error: taut_rpc: #[rpc] requires an async fn
+ --> tests/ui/non-async-fail.rs:4:1
+  |
+4 | fn ping() -> &'static str {
+  | ^^

@@ -19,7 +19,38 @@ Each entry below MUST note an IR or wire bump if one happened.
 
 ---
 
-## [Unreleased]
+## [Unreleased] — Phase 1
+
+### Added
+
+- `#[rpc]` attribute macro: free async fns, 0 or 1 input arg, query/mutation, return T or Result<T, E>.
+- `#[derive(Type)]` macro for structs (named/tuple/unit), enums (unit/tuple/struct variants).
+- `taut_rpc::TautType` trait + blanket impls for primitives, Option, Vec, fixed arrays, HashMap, tuples up to 4.
+- `taut_rpc::ProcedureDescriptor` + type-erased `ProcedureHandler`.
+- `Router::procedure(...)`, `Router::ir(...)`, `Router::into_axum(...)` rewritten for real registration.
+- SPEC envelope wrapping for axum `JsonRejection` and unknown procedures.
+- `taut_rpc::dump_if_requested(&router)` for `cargo taut gen --from-binary` IR extraction.
+- `cargo taut gen` codegen: emits a single `api.gen.ts` with type aliases, Procedures map, `createApi` helper.
+- `npm/taut-rpc` runtime: re-exported `TautError`, added `isTautError` typeguard.
+- Phase 1 example (`examples/phase1/`) using the macro-driven flow end-to-end.
+- Cargo features: `ir-export` (debug `/rpc/_ir` route), `uuid`, `chrono`.
+
+### Changed
+
+- Router's procedure list is now backed by typed `ProcedureDescriptor` (was Phase 0 stub).
+- Workspace `taut-rpc` adds `taut-rpc-macros` as a dep so users only depend on `taut-rpc`.
+
+### IR
+
+- IR_VERSION still 0 (no shape change). Bumps to come when validation/extension fields land.
+
+### Wire
+
+- No change.
+
+---
+
+## [0.0.0-phase0] - 2026-05-06
 
 ### Added
 

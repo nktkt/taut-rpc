@@ -54,7 +54,19 @@ export class HttpTransport implements Transport {
       method,
       headers: { "content-type": "application/json", ...this.resolveHeaders() },
       signal: ctrl.signal,
-      ...(method === "GET" ? {} : { body: JSON.stringify({ input }) }),
+      // Coerce undefined input to explicit null so JSON.stringify keeps the
+      // `input` key (otherwise it's elided and the server's `RpcRequest`
+      // decoder rejects the missing field). BigInts in the payload are
+      // downcast to JS numbers so JSON.stringify accepts them; values
+      // above 2^53 will lose precision in this default mode (use the
+      // codegen `--bigint-strategy as-string` option for full precision).
+      ...(method === "GET"
+        ? {}
+        : {
+            body: JSON.stringify({ input: input ?? null }, (_k, v) =>
+              typeof v === "bigint" ? Number(v) : v,
+            ),
+          }),
     };
 
     let resp: Response;

@@ -21,6 +21,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+mod codegen;
 mod commands;
 
 /// `cargo taut` — codegen and IR tooling for `taut-rpc`.

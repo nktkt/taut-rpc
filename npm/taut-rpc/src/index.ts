@@ -38,8 +38,8 @@ export type ProcedureKind = "query" | "mutation" | "subscription";
  * domain to carry input/output/error types for inference. They are never
  * assigned at runtime.
  */
-export interface ProcedureDef<I, O, E> {
-  kind: ProcedureKind;
+export interface ProcedureDef<I, O, E, K extends ProcedureKind = ProcedureKind> {
+  kind: K;
   /** Procedure name as registered server-side (e.g., `"users.get"`). */
   name: string;
   /** Phantom: input type. Never assigned. */
@@ -98,6 +98,14 @@ export interface ClientOptions {
   fetch?: typeof fetch;
   /** Headers added to every request. Either a static map or a thunk evaluated per request. */
   headers?: Record<string, string> | (() => Record<string, string>);
+  /**
+   * Optional map of procedure-name → kind. Generated `api.gen.ts` (Phase 1
+   * `createApi` helper) supplies this so the runtime tags each call with the
+   * correct {@link ProcedureKind} on the wire (forwarded by the HTTP transport
+   * as `x-taut-kind`). Without it, the proxy defaults plain calls to `"query"`.
+   * Subscriptions are detected from the `subscribe` access regardless.
+   */
+  kinds?: Record<string, ProcedureKind>;
 }
 
 // ---------------------------------------------------------------------------
@@ -117,9 +125,9 @@ export interface ClientOptions {
  * sees the flat form here. Generated `api.gen.ts` typically re-exports a
  * nested type-map for nicer dotted IntelliSense.
  */
-export type ClientOf<P extends Procedures> = {
-  [K in keyof P]: P[K] extends ProcedureDef<infer I, infer O, infer _E>
-    ? P[K]["kind"] extends "subscription"
+export type ClientOf<P> = {
+  [K in keyof P]: P[K] extends ProcedureDef<infer I, infer O, infer _E, infer Kind>
+    ? Kind extends "subscription"
       ? {
           subscribe: I extends void | undefined
             ? () => AsyncIterable<O>
@@ -139,7 +147,11 @@ export type ClientOf<P extends Procedures> = {
 const ROOT = Symbol("taut.client.root");
 
 /** Internal: build a chainable proxy that accumulates a dotted name path. */
-function makeProxy(transport: Transport, path: readonly string[]): any {
+function makeProxy(
+  transport: Transport,
+  path: readonly string[],
+  kinds: Record<string, ProcedureKind> | undefined,
+): any {
   // The target is a function so the proxy is callable.
   const target = (() => {}) as any;
 
@@ -154,15 +166,17 @@ function makeProxy(transport: Transport, path: readonly string[]): any {
           transport.subscribe(path.join("."), input);
       }
       // Otherwise extend the path.
-      return makeProxy(transport, [...path, prop]);
+      return makeProxy(transport, [...path, prop], kinds);
     },
     apply(_t, _thisArg, args) {
-      // Direct call: treat as query/mutation. We don't know which without the
-      // type-map at runtime — default to "query". The wire format is identical
-      // (SPEC §4.1); only the `x-taut-kind` header differs and is informational.
+      // Direct call: query or mutation. We resolve the kind via the optional
+      // `kinds` map (supplied by codegen). Without it we default to `"query"`.
+      // The wire format is identical (SPEC §4.1); only the `x-taut-kind`
+      // header differs and is informational.
       const name = path.join(".");
       const input = args.length === 0 ? undefined : args[0];
-      return transport.call(name, "query", input);
+      const kind: ProcedureKind = kinds?.[name] ?? "query";
+      return transport.call(name, kind, input);
     },
   });
 }
@@ -180,11 +194,11 @@ function makeProxy(transport: Transport, path: readonly string[]): any {
  * Static type-safety comes entirely from `P` (the user's generated
  * `Procedures` map); the runtime is duck-typed.
  */
-export function createClient<P extends Procedures>(
+export function createClient<P>(
   opts: ClientOptions,
 ): ClientOf<P> {
   const transport = opts.transport ?? defaultTransport(opts);
-  return makeProxy(transport, []) as ClientOf<P>;
+  return makeProxy(transport, [], opts.kinds) as ClientOf<P>;
 }
 
 /**
@@ -252,8 +266,44 @@ function defaultTransport(opts: ClientOptions): Transport {
 // Re-exports — sibling transport implementations
 // ---------------------------------------------------------------------------
 
-export { HttpTransport } from "./http.js";
+export { HttpTransport, TautError } from "./http.js";
 export { SseTransport } from "./sse.js";
+
+// ---------------------------------------------------------------------------
+// Typed-error narrowing helper
+// ---------------------------------------------------------------------------
+
+import { TautError as _TautError } from "./http.js";
+
+/**
+ * Type-guard that narrows `unknown` to {@link TautError}, optionally also
+ * matching a specific error code. Useful in `catch` blocks where the value
+ * is `unknown`:
+ *
+ * ```ts
+ * try {
+ *   await api.users.get({ id: 1 });
+ * } catch (err) {
+ *   if (isTautError(err, "not_found")) {
+ *     //          ^? TautError<"not_found", unknown>
+ *     console.warn("missing:", err.payload);
+ *   } else {
+ *     throw err;
+ *   }
+ * }
+ * ```
+ *
+ * Generated `api.gen.ts` callers can compose this with the procedure's
+ * declared error type to recover the typed payload.
+ */
+export function isTautError<C extends string>(
+  err: unknown,
+  code?: C,
+): err is _TautError<C, unknown> {
+  if (!(err instanceof _TautError)) return false;
+  if (code !== undefined && err.code !== code) return false;
+  return true;
+}
 
 // ---------------------------------------------------------------------------
 // In-source tests (vitest)

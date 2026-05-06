@@ -16,5 +16,13 @@ proc-macro2.workspace = true
 quote.workspace = true
 syn.workspace = true
 
+[dev-dependencies]
+trybuild = "1.0"
+# Needed for the `pass` UI tests to actually compile against the runtime
+# crate's re-exports. This is a [dev-dependency] only, so the proc-macro
+# crate stays free of a runtime dep at publish time.
+taut-rpc = { path = "../taut-rpc" }
+serde = { workspace = true }
+
 [lints]
 workspace = true

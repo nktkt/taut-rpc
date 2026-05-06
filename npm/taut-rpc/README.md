@@ -61,6 +61,15 @@ file and surfaces as a TypeScript error at the call site.
 documented in [SPEC.md §4](https://github.com/nktkt/taut-rpc/blob/main/SPEC.md)
 and gated by an `ir_version` field; mismatches are refused by codegen.
 
+## Changelog
+
+- **Phase 1** — `createApi`-friendly surface for codegen-emitted `api.gen.ts`:
+  re-exports `TautError` from the package root, adds the `isTautError(err,
+  code?)` type-guard for typed `catch` handlers, and accepts an optional
+  `kinds` map on `ClientOptions` so per-procedure `query` / `mutation` /
+  `subscription` tags reach the transport (forwarded as `x-taut-kind`).
+  No breaking changes to existing exports.
+
 ## License
 
 MIT OR Apache-2.0

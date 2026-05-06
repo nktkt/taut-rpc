@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[lib]
+name = "taut_rpc_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "cargo-taut"
 path = "src/main.rs"
@@ -17,6 +21,7 @@ clap.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+taut-rpc = { path = "../taut-rpc" }
 
 [lints]
 workspace = true

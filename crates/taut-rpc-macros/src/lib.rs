@@ -4,14 +4,16 @@
 //! `taut-rpc` and import the macros via its re-exports rather than depending on
 //! this crate directly.
 //!
-//! Two macros are provided:
+//! Two macros are provided in Phase 1:
 //!
-//! - `#[rpc]` — attribute macro applied to an `async fn` to register it as an
-//!   RPC procedure. Supports the forms `#[rpc]`, `#[rpc(stream)]`, and
-//!   `#[rpc(method = "GET")]`. See SPEC §2 (architecture) and §4 (wire format).
+//! - `#[rpc]` — attribute macro applied to a free `async fn` (queries and
+//!   mutations only in Phase 1; `#[rpc(stream)]` lands in Phase 3). Supports
+//!   `#[rpc]` and `#[rpc(method = "GET")]`. See SPEC §2 (architecture) and §4
+//!   (wire format).
 //! - `#[derive(Type)]` — derive macro that records a Rust type in the IR so
-//!   the codegen step can emit a corresponding TypeScript definition. See
-//!   SPEC §3 (type mapping).
+//!   the codegen step can emit a corresponding TypeScript definition. Works on
+//!   structs (named, tuple, unit) and enums (unit, tuple, struct variants).
+//!   See SPEC §3 (type mapping).
 //!
 //! Both macros report errors via `syn::Error::into_compile_error` so failures
 //! surface as compiler diagnostics rather than panics.

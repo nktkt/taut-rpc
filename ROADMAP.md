@@ -13,12 +13,12 @@ Target for the first stable release: **0.1.0**, scoped narrow on purpose. Anythi
 
 ## Phase 1 — Macro + IR + minimal codegen
 
-- [ ] `taut-rpc-macros`: `#[rpc]` attribute on free async fns. Emit axum handler + IR fragment.
-- [ ] `#[derive(Type)]`: walk the struct/enum, emit IR type entries.
-- [ ] `taut-rpc-cli`: read `target/taut/ir.json`, emit `api.gen.ts` with type aliases and a `Procedures` interface keyed by procedure name.
-- [ ] Runtime npm package `taut-rpc`: 50-line fetch wrapper.
+- [x] `taut-rpc-macros`: `#[rpc]` attribute on free async fns. Emit axum handler + IR fragment.
+- [x] `#[derive(Type)]`: walk the struct/enum, emit IR type entries.
+- [x] `taut-rpc-cli`: read `target/taut/ir.json`, emit `api.gen.ts` with type aliases and a `Procedures` interface keyed by procedure name.
+- [x] Runtime npm package `taut-rpc`: 50-line fetch wrapper.
 
-**Exit criteria:** `cargo run` + `cargo taut gen` produces a working typed client for queries and mutations on a sample app. Tests cover the type mapping table from §3.1 of the spec.
+**Exit criteria:** `cargo run` + `cargo taut gen` produces a working typed client for queries and mutations on a sample app. Tests cover the type mapping table from §3.1 of the spec. *(landed on main 2026-05-06)*
 
 ## Phase 2 — Errors and middleware
 

@@ -21,9 +21,28 @@ tracing.workspace = true
 async-trait.workspace = true
 http.workspace = true
 bytes.workspace = true
+taut-rpc-macros = { path = "../taut-rpc-macros", version = "0.0.0" }
+
+[features]
+default = []
+ir-export = []
+uuid = ["dep:uuid"]
+chrono = ["dep:chrono"]
+
+[dependencies.uuid]
+version = "1"
+optional = true
+features = ["serde"]
+
+[dependencies.chrono]
+version = "0.4"
+optional = true
+features = ["serde"]
 
 [dev-dependencies]
 tower = { workspace = true, features = ["util"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+taut-rpc-cli = { path = "../taut-rpc-cli" }
 
 [lints]
 workspace = true

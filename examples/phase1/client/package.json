@@ -1,0 +1,22 @@
+{
+  "name": "phase1-client",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "build-api": "cd ../../.. && cargo run -p taut-rpc-cli -- taut gen --from-binary examples/phase1/server/target/debug/phase1-server --out examples/phase1/client/src/api.gen.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "taut-rpc": "file:../../../npm/taut-rpc"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.6.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

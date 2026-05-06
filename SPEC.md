@@ -148,8 +148,41 @@ Constraints supported in 0.1: `min`, `max`, `length`, `pattern`, `email`, `url`.
 - **Generic procedures.** Allow `#[rpc] async fn list<T>(...)`? Almost certainly no in 0.1; force monomorphic wrappers.
 - **Authentication contract.** Should errors carry an `unauthenticated` discriminant by convention? Lean yes.
 
+### Resolved during Phase 0/1
+
+- **JsonRejection handling.** *Decided.* The Phase 1 `Router` catches axum's
+  `JsonRejection` and re-emits the SPEC error envelope with
+  `code = "decode_error"`, `payload.message = <rejection text>`, HTTP status
+  400. Body shape: `{"err":{"code":"decode_error","payload":{"message":"..."}}}`.
+- **Unknown procedure 404.** *Decided.* A request to an unregistered procedure
+  name returns `{"err":{"code":"not_found","payload":{"procedure":"<name>"}}}`
+  with HTTP status 404 — same envelope shape as application errors so clients
+  have one parser path.
+- **Health endpoint shape.** *Decided for v0.1.* `GET /rpc/_health` returns
+  `text/plain` body `ok` with status 200. Simple by design; if monitoring tools
+  push for a JSON `{ "status": "ok", "version": "..." }` shape we'll revisit
+  in v0.2.
+
 ## 9. Compatibility & versioning
 
 - IR has a `"ir_version"` field; codegen refuses mismatches.
 - Wire format has a `"v"` field on subscription frames; missing means v0.
 - The `taut-rpc` crate and the generated client are versioned together; the runtime npm package's major version tracks the crate's.
+
+## 10. v0.1 surface
+
+The exact set of features that ship in v0.1 (i.e. what Phase 1 of the roadmap
+delivers, before errors/middleware, subscriptions, and the validation bridge
+land in later phases):
+
+- `#[rpc]` on free `async fn`s with **0 or 1** input argument. Both queries
+  (default) and mutations are supported. `#[rpc(stream)]` is **not** in v0.1
+  (Phase 3). `#[rpc(method = "GET")]` is supported.
+- `#[derive(Type)]` for:
+  - structs: named, tuple, newtype, unit;
+  - enums: unit variants, tuple variants, struct variants.
+- `cargo taut gen` codegen, emitting one `api.gen.ts` per project.
+- **Stateless server only.** axum's `State<S>` extractor is **not** supported
+  in v0.1; procedures are free functions whose state must be reached via
+  `OnceCell`/`static` for now. Stateful handlers land alongside Phase 2
+  middleware.
