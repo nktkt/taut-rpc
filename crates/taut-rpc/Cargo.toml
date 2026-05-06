@@ -17,6 +17,7 @@ axum.workspace = true
 tokio.workspace = true
 tower.workspace = true
 futures.workspace = true
+async-stream.workspace = true
 tracing.workspace = true
 async-trait.workspace = true
 http.workspace = true
@@ -28,6 +29,11 @@ default = []
 ir-export = []
 uuid = ["dep:uuid"]
 chrono = ["dep:chrono"]
+# WebSocket subscription transport (SPEC §4.2). Off by default so users that
+# only need queries / mutations / SSE don't pay for axum's `ws` feature flag
+# (which itself pulls in tokio-tungstenite). Enabling `ws` mounts a
+# `GET /rpc/_ws` route that multiplexes subscriptions over a single socket.
+ws = ["axum/ws"]
 
 [dependencies.uuid]
 version = "1"
@@ -42,6 +48,8 @@ features = ["serde"]
 [dev-dependencies]
 tower = { workspace = true, features = ["util"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+async-stream = { workspace = true }
+futures = { workspace = true }
 taut-rpc-cli = { path = "../taut-rpc-cli" }
 
 [lints]

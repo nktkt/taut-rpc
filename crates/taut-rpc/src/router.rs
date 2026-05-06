@@ -1,39 +1,66 @@
 //! Server-side procedure router for taut-rpc. See SPEC §5.
 //!
-//! Phase 1: this module owns the runtime registration table for `#[rpc]`
-//! procedures and converts that table into a real `axum::Router` that
-//! dispatches `POST /rpc/<name>` against type-erased
-//! [`crate::procedure::ProcedureHandler`]s.
+//! This module owns the runtime registration table for `#[rpc]` procedures
+//! and converts that table into a real `axum::Router`. Queries and mutations
+//! dispatch as `POST /rpc/<name>` against [`crate::procedure::UnaryHandler`]s
+//! returning JSON envelopes; subscriptions dispatch as
+//! `GET /rpc/<name>?input=<urlencoded-json>` against
+//! [`crate::procedure::StreamHandler`]s returning a `text/event-stream` body.
 //!
-//! Wire-format obligations come from SPEC §4.1: success → `{"ok": <Output>}`,
-//! errors → `{"err": {"code": ..., "payload": ...}}`. The success/error split
-//! is communicated by the [`crate::procedure::ProcedureResult`] returned from
-//! each handler; this module is responsible for shaping that into a real
-//! HTTP response and for funneling decode failures and unknown-procedure
-//! requests through the same envelope.
+//! Wire-format obligations come from SPEC §4. For unary procedures (§4.1):
+//! success → `{"ok": <Output>}`, errors → `{"err": {"code": ..., "payload": ...}}`,
+//! communicated by [`crate::procedure::ProcedureResult`]. For subscriptions
+//! (§4.2): each [`crate::procedure::StreamFrame`] becomes an SSE event
+//! (`event: data` / `event: error`), and the router appends a closing
+//! `event: end` frame when the underlying stream completes.
 //!
 //! # Phase boundaries
 //!
-//! - Phase 1 (this module): query + mutation dispatch via JSON over POST,
-//!   debug introspection endpoints, the SPEC-shaped `not_found` fallback for
-//!   unknown procedures, and a custom extractor that maps decode failures to
-//!   the `decode_error` envelope.
-//! - Phase 3 will add subscription dispatch (SSE/WebSocket per SPEC §4.2).
-//!   For now, subscription procedures are accepted by `procedure(...)` so
-//!   their IR is captured, but no HTTP route is mounted for them.
-//! - Per-procedure `#[rpc(method = "GET")]` opt-in (SPEC §4.1) is also
-//!   deferred — every Phase 1 procedure routes as POST.
+//! - Phase 1/2: query + mutation dispatch via JSON over POST, debug
+//!   introspection endpoints, the SPEC-shaped `not_found` fallback for
+//!   unknown procedures, a custom extractor that maps decode failures to the
+//!   `decode_error` envelope, and `tower::Layer` integration via
+//!   [`Router::layer`].
+//! - Phase 3 (this revision): subscription dispatch via SSE per SPEC §4.2.
+//!   Subscription procedures registered through [`Router::procedure`] mount a
+//!   `GET /rpc/<name>?input=<urlencoded-json>` route that streams
+//!   `event: data` / `event: error` frames terminated by `event: end`. Bad
+//!   JSON in `?input=` produces a single in-band `event: error` frame whose
+//!   `code` is `decode_error`, then the closing `event: end` — the SSE body
+//!   has already been framed by the time we know the input is bad, so an
+//!   HTTP 4xx isn't appropriate.
+//! - Phase 3 (this revision, gated): WebSocket transport per SPEC §4.2.
+//!   When the `ws` feature is enabled, [`Router::into_axum`] mounts a single
+//!   `GET /rpc/_ws` route that multiplexes subscriptions over one connection
+//!   using [`crate::wire::WsMessage`] frames. Implementation lives in
+//!   [`ws::ws_route`]. Queries and mutations remain on POST; only
+//!   subscription procedures are addressable over WS in v0.1.
+//! - Per-procedure `#[rpc(method = "GET")]` opt-in for queries (SPEC §4.1)
+//!   is still deferred — every query/mutation routes as POST.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{FromRequest, Request};
+use axum::extract::{FromRequest, Query, Request};
 use axum::http::StatusCode;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::Router as AxumRouter;
+use futures::stream::StreamExt;
 
-use crate::procedure::{ProcedureDescriptor, ProcedureResult};
+use crate::procedure::{ProcedureBody, ProcedureDescriptor, ProcedureResult, StreamFrame};
 use crate::wire::RpcRequest;
+
+// WebSocket transport (SPEC §4.2). Mounted under `cfg(feature = "ws")` only;
+// the source file lives at `src/ws.rs` rather than `src/router/ws.rs`, so we
+// point `mod` at it explicitly via `#[path]`. Keeping the file alongside the
+// other top-level transport modules (wire.rs, dump.rs, ...) matches the
+// crate's existing layout, while still scoping the module under `router::` so
+// the registration site below can write `crate::router::ws::ws_route::...`.
+#[cfg(feature = "ws")]
+#[path = "ws.rs"]
+mod ws;
 
 /// Runtime tag for a registered procedure's flavor.
 ///
@@ -192,7 +219,13 @@ impl Router {
     /// - `GET  /rpc/_procedures` → JSON array of registered procedure names.
     /// - `GET  /rpc/_ir` → full IR JSON, gated behind the `ir-export` feature.
     /// - `POST /rpc/<name>` for every registered query/mutation procedure.
-    ///   Subscription procedures are skipped pending Phase 3 (SSE/WS, SPEC §4.2).
+    /// - `GET  /rpc/<name>?input=<urlencoded-json>` for every registered
+    ///   subscription procedure, returning a `text/event-stream` body shaped
+    ///   per SPEC §4.2 (`event: data | error | end`).
+    /// - `GET  /rpc/_ws` (gated behind the `ws` feature) — a single
+    ///   WebSocket that multiplexes subscriptions via [`crate::wire::WsMessage`].
+    ///   Only subscription procedures are reachable over WS in v0.1; queries
+    ///   and mutations remain on POST per SPEC §4.1.
     ///
     /// Unknown routes fall through to a SPEC §4.1 envelope:
     /// `404 {"err": {"code": "not_found", "payload": {"procedure": "<name>"}}}`.
@@ -241,11 +274,43 @@ impl Router {
             );
         }
 
+        // SPEC §4.2 WebSocket transport. Multiplexes subscriptions over a
+        // single connection at `/rpc/_ws`; SSE remains available per-procedure
+        // at `GET /rpc/<name>` and is the default. Cloning the descriptor vec
+        // once into an `Arc` lets the WS handler share it across upgrades
+        // without re-walking `self.procedures` (which we drain immediately
+        // below to mount per-procedure routes). `ProcedureDescriptor` is
+        // `Clone` (the body is an `Arc`-wrapped closure), so the clone is
+        // cheap.
+        #[cfg(feature = "ws")]
+        {
+            let descriptors_arc: Arc<Vec<ProcedureDescriptor>> =
+                Arc::new(self.procedures.clone());
+            app = app.route(
+                "/rpc/_ws",
+                axum::routing::get(crate::router::ws::ws_route::ws_handler(descriptors_arc)),
+            );
+        }
+
         for desc in std::mem::take(&mut self.procedures) {
+            let path = format!("/rpc/{}", desc.name);
             match desc.kind {
                 ProcKindRuntime::Query | ProcKindRuntime::Mutation => {
-                    let handler = desc.handler.clone();
-                    let path = format!("/rpc/{}", desc.name);
+                    // Phase 3: dispatch through `ProcedureBody`. Query and
+                    // mutation procedures are always `ProcedureBody::Unary` —
+                    // the macro emission enforces this pairing. We
+                    // destructure here so the Stream arm becomes a loud
+                    // startup panic rather than a silent runtime fall-through
+                    // if a malformed descriptor ever leaks past the macro.
+                    let handler = match desc.body {
+                        ProcedureBody::Unary(h) => h,
+                        ProcedureBody::Stream(_) => {
+                            unreachable!(
+                                "taut-rpc: query/mutation `{}` was registered with a streaming body",
+                                desc.name
+                            )
+                        }
+                    };
                     app = app.route(
                         &path,
                         axum::routing::post(move |input: RpcInput| {
@@ -259,9 +324,29 @@ impl Router {
                     );
                 }
                 ProcKindRuntime::Subscription => {
-                    // TODO(Phase 3): mount SSE GET / WebSocket route per SPEC §4.2.
-                    // The descriptor's IR is still surfaced via `/rpc/_procedures`
-                    // and `/rpc/_ir` so codegen can see subscriptions today.
+                    // Symmetric to the unary branch: subscriptions must carry
+                    // a `Stream` body. A `Unary` body here is a macro-side
+                    // bug, so panic at startup with the offending name —
+                    // bypassing this lazily would surface as a confusing
+                    // 404 or 500 the first time the subscription is hit.
+                    let handler = match desc.body {
+                        ProcedureBody::Stream(h) => h,
+                        ProcedureBody::Unary(_) => {
+                            unreachable!(
+                                "taut-rpc: subscription `{}` was registered with a unary body",
+                                desc.name
+                            )
+                        }
+                    };
+                    app = app.route(
+                        &path,
+                        axum::routing::get(move |Query(params): Query<HashMap<String, String>>| {
+                            let handler = handler.clone();
+                            async move {
+                                sse_response_for(handler, params.get("input").map(String::as_str))
+                            }
+                        }),
+                    );
                 }
             }
         }
@@ -343,6 +428,116 @@ fn procedure_result_into_response(result: ProcedureResult) -> Response {
     }
 }
 
+/// Decode the `?input=` query parameter for a subscription into a JSON value.
+///
+/// Per SPEC §4.2 the subscription input is URL-encoded JSON. Two flavors of
+/// "missing" collapse to JSON `null`:
+///
+/// - the parameter is absent entirely (`/rpc/<name>` with no query string);
+/// - the parameter is present but empty (`/rpc/<name>?input=`).
+///
+/// Both are treated as `null` so unit-input subscriptions ergonomically
+/// dispatch on `?input=` or no query at all. Any other value must be valid
+/// JSON; on `serde_json::Error` we surface the error to the caller so the
+/// SSE handler can emit an in-band `decode_error` frame instead of an HTTP
+/// 4xx — the connection is event-stream-framed by the time the handler
+/// produces a body, so structured errors must ride the same channel.
+fn parse_input_param(raw: Option<&str>) -> Result<serde_json::Value, serde_json::Error> {
+    match raw {
+        None | Some("") => Ok(serde_json::Value::Null),
+        Some(s) => serde_json::from_str(s),
+    }
+}
+
+/// Build the SSE response body for a subscription procedure (SPEC §4.2).
+///
+/// Two paths feed into one event stream:
+///
+/// 1. **Decode failure** of the `?input=` parameter: emit a single
+///    `event: error\ndata: {"code":"decode_error",...}\n\n` frame followed by
+///    `event: end`. Per SPEC §4.2 a malformed subscription input does not
+///    produce a 400 HTTP status — by the time the client is reading the body
+///    it expects event-stream framing, so we surface decode failures as an
+///    in-band error frame whose envelope mirrors the unary `decode_error`
+///    shape (clients can share a parser between transports).
+///
+/// 2. **Successful decode**: invoke the [`crate::procedure::StreamHandler`],
+///    map each emitted [`StreamFrame`] to the corresponding SSE event, then
+///    append a closing `event: end` frame after the user stream completes.
+///    The `end` frame is generated here, not by the handler — handlers
+///    signal completion by terminating their `BoxStream`.
+///
+/// `Sse::new` requires an item type of `Result<Event, E>` where `E:
+/// std::error::Error`; we use `Infallible` because every event we produce is
+/// hand-shaped from already-deserialized `serde_json::Value`s and a
+/// `json!({...})` literal, neither of which can fail JSON serialization.
+fn sse_response_for(
+    handler: crate::procedure::StreamHandler,
+    raw_input: Option<&str>,
+) -> Sse<futures::stream::BoxStream<'static, Result<Event, std::convert::Infallible>>> {
+    use futures::stream;
+
+    // Both arms produce *different* concrete stream types, so erase to a
+    // `BoxStream` to give the function a single return type. The cost is
+    // one allocation per request, negligible next to the SSE socket
+    // lifetime.
+    let event_stream: futures::stream::BoxStream<
+        'static,
+        Result<Event, std::convert::Infallible>,
+    > = match parse_input_param(raw_input) {
+        Err(e) => {
+            // Synthesize a single `event: error` frame describing the decode
+            // failure. The payload mirrors the unary `decode_error` envelope
+            // shape so clients can share a parser between transports.
+            let event = Event::default()
+                .event("error")
+                .json_data(serde_json::json!({
+                    "code": "decode_error",
+                    "payload": { "message": e.to_string() },
+                }))
+                .expect("valid json");
+            stream::once(async move { Ok(event) }).boxed()
+        }
+        Ok(input_json) => {
+            // Map each handler frame to an SSE event. `Event::json_data`
+            // only fails when its argument isn't serializable to JSON — but
+            // we feed it already-deserialized `serde_json::Value`s and a
+            // hand-rolled `json!({...})` literal, both of which are
+            // guaranteed JSON. The `expect`s therefore can never fire at
+            // runtime.
+            let frames = handler(input_json);
+            frames
+                .map(|frame| {
+                    let event = match frame {
+                        StreamFrame::Data(v) => Event::default()
+                            .event("data")
+                            .json_data(v)
+                            .expect("valid json"),
+                        StreamFrame::Error { code, payload } => Event::default()
+                            .event("error")
+                            .json_data(serde_json::json!({
+                                "code": code,
+                                "payload": payload,
+                            }))
+                            .expect("valid json"),
+                    };
+                    Ok::<Event, std::convert::Infallible>(event)
+                })
+                .boxed()
+        }
+    };
+
+    // SPEC §4.2 mandates a trailing `event: end` frame; the router emits it
+    // (handlers just terminate their stream). We append it via `chain` so
+    // every code path — decode-error, normal completion, empty stream —
+    // closes with the same frame.
+    let end = stream::once(async {
+        Ok::<Event, std::convert::Infallible>(Event::default().event("end").data(""))
+    });
+
+    Sse::new(event_stream.chain(end).boxed()).keep_alive(KeepAlive::default())
+}
+
 /// Fallback handler that returns the SPEC §4.1 `not_found` envelope for any
 /// path that didn't match a registered route. The procedure name is taken from
 /// the request URI so clients can correlate it with their generated client's
@@ -368,16 +563,17 @@ async fn not_found_fallback(req: Request) -> Response {
 mod tests {
     use super::*;
     use crate::ir::{HttpMethod, ProcKind, Primitive, Procedure, TypeRef};
-    use crate::procedure::ProcedureHandler;
+    use crate::procedure::{StreamHandler, UnaryHandler};
     use axum::body::Body;
     use futures::future::BoxFuture;
+    use futures::stream::{self, BoxStream};
     use http::Request as HttpRequest;
     use tower::ServiceExt;
 
     fn make_descriptor(
         name: &'static str,
         kind: ProcKindRuntime,
-        handler: ProcedureHandler,
+        handler: UnaryHandler,
     ) -> ProcedureDescriptor {
         let ir_kind = match kind {
             ProcKindRuntime::Query => ProcKind::Query,
@@ -397,17 +593,22 @@ mod tests {
                 doc: None,
             },
             type_defs: vec![],
-            handler,
+            // Phase 3: the descriptor's body is now an enum; the existing
+            // router tests all exercise unary dispatch so we wrap in
+            // `ProcedureBody::Unary` here. Streaming-side tests live in
+            // `procedure.rs` for now; Agent 2 will add HTTP-level streaming
+            // tests when the SSE route lands.
+            body: ProcedureBody::Unary(handler),
         }
     }
 
-    fn echo_handler() -> ProcedureHandler {
+    fn echo_handler() -> UnaryHandler {
         Arc::new(|input: serde_json::Value| -> BoxFuture<'static, ProcedureResult> {
             Box::pin(async move { ProcedureResult::Ok(input) })
         })
     }
 
-    fn not_found_handler() -> ProcedureHandler {
+    fn not_found_handler() -> UnaryHandler {
         Arc::new(|_input: serde_json::Value| -> BoxFuture<'static, ProcedureResult> {
             Box::pin(async move {
                 ProcedureResult::Err {
@@ -416,6 +617,42 @@ mod tests {
                     payload: serde_json::Value::Null,
                 }
             })
+        })
+    }
+
+    /// Build a [`ProcedureDescriptor`] wrapping a streaming body.
+    ///
+    /// Mirrors `make_descriptor` for the streaming side: same IR shape, but
+    /// `kind = ProcKindRuntime::Subscription` and `body =
+    /// ProcedureBody::Stream(handler)`. Used by the SPEC §4.2 SSE tests
+    /// below.
+    fn make_stream_descriptor(
+        name: &'static str,
+        handler: StreamHandler,
+    ) -> ProcedureDescriptor {
+        ProcedureDescriptor {
+            name,
+            kind: ProcKindRuntime::Subscription,
+            ir: Procedure {
+                name: name.to_string(),
+                kind: ProcKind::Subscription,
+                input: TypeRef::Primitive(Primitive::Unit),
+                output: TypeRef::Primitive(Primitive::Unit),
+                errors: vec![],
+                http_method: HttpMethod::Get,
+                doc: None,
+            },
+            type_defs: vec![],
+            body: ProcedureBody::Stream(handler),
+        }
+    }
+
+    /// Build a [`StreamHandler`] that yields `n` `StreamFrame::Data(json!(i))`
+    /// items for `i` in `0..n`. Lets the subscription tests assert on exact
+    /// frame contents without baking the stream construction into each test.
+    fn counting_stream_handler(n: usize) -> StreamHandler {
+        Arc::new(move |_input: serde_json::Value| -> BoxStream<'static, StreamFrame> {
+            stream::iter((0..n).map(|i| StreamFrame::Data(serde_json::json!(i)))).boxed()
         })
     }
 
@@ -610,34 +847,6 @@ mod tests {
             .procedure(make_descriptor("dup", ProcKindRuntime::Query, echo_handler()));
     }
 
-    #[tokio::test]
-    async fn subscription_procedure_does_not_mount_an_http_route() {
-        // Subscriptions are accepted (so their IR is captured) but not yet
-        // routed — Phase 3 will add SSE/WS dispatch. Until then, hitting the
-        // path falls through to the not_found fallback.
-        let app = Router::new()
-            .procedure(make_descriptor(
-                "stream",
-                ProcKindRuntime::Subscription,
-                echo_handler(),
-            ))
-            .into_axum();
-
-        let response = app
-            .oneshot(
-                HttpRequest::builder()
-                    .method("POST")
-                    .uri("/rpc/stream")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"input":null}"#))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-
     #[test]
     fn ir_snapshot_contains_registered_procedures() {
         let router = Router::new()
@@ -770,6 +979,188 @@ mod tests {
             // The last `.layer()` call wins — that's the SPEC §5 contract,
             // matching `axum::Router::layer` and `tower`'s own ordering.
             Some("outer"),
+        );
+    }
+
+    // ---- Subscription dispatch (Phase 3 — SPEC §4.2) ------------------
+
+    #[tokio::test]
+    async fn subscription_route_emits_three_data_frames_then_end() {
+        // Register a subscription whose handler yields three Data frames,
+        // hit the SSE route, and verify the body contains the three frames
+        // in order followed by the closing `event: end` frame the router
+        // appends. Keepalive comments aren't asserted on here — they're
+        // emitted on a timer and don't appear during the brief synchronous
+        // lifetime of `oneshot`, which keeps this test deterministic.
+        let app = Router::new()
+            .procedure(make_stream_descriptor("ticks", counting_stream_handler(3)))
+            .into_axum();
+
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("GET")
+                    .uri("/rpc/ticks?input=null")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        // Content-Type must be `text/event-stream`; axum's `Sse` sets this
+        // automatically. Pinning it here pins the SPEC §4.2 transport.
+        let ct = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            ct.starts_with("text/event-stream"),
+            "expected text/event-stream content-type, got {ct:?}"
+        );
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&bytes).expect("utf8 body");
+
+        // Each Data frame should appear in order, followed by `event: end`.
+        // We string-match the SSE wire bytes rather than parse — the framing
+        // is small and stable per SPEC §4.2, and a structural parse would
+        // only re-derive these same assertions.
+        for i in 0..3 {
+            let needle = format!("event: data\ndata: {i}\n\n");
+            assert!(
+                body.contains(&needle),
+                "missing data frame {i}; body was:\n{body}"
+            );
+        }
+        assert!(
+            body.contains("event: end"),
+            "missing terminating event:end frame; body was:\n{body}"
+        );
+
+        // Order check: `event: end` must come after the last data frame.
+        // Without this we could be matching an interleaved stream and miss
+        // a bug where the router emits `end` before the handler stream
+        // drains.
+        let last_data_idx = body.rfind("event: data").expect("at least one data frame");
+        let end_idx = body.find("event: end").expect("end frame present");
+        assert!(
+            end_idx > last_data_idx,
+            "event:end must follow the last data frame; body was:\n{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn subscription_decode_error_emits_error_frame_then_end() {
+        // Per SPEC §4.2 a malformed `?input=` doesn't get a 400 status — by
+        // the time the body is being read the response is already framed
+        // text/event-stream. We synthesize a single in-band error frame
+        // followed by `event: end`. This pins both pieces of that contract.
+        let app = Router::new()
+            .procedure(make_stream_descriptor(
+                "ticks",
+                // The handler is never invoked when input fails to decode,
+                // so any stream handler suffices here.
+                counting_stream_handler(0),
+            ))
+            .into_axum();
+
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("GET")
+                    .uri("/rpc/ticks?input=not-json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&bytes).expect("utf8 body");
+
+        // The error frame must (a) be tagged `event: error`, (b) carry a
+        // JSON body whose `code` is `decode_error`, and (c) precede
+        // `event: end`. We assert structurally on the JSON instead of
+        // pinning the exact serde_json error message — that text drifts
+        // between serde_json releases.
+        assert!(
+            body.contains("event: error"),
+            "missing event:error frame; body was:\n{body}"
+        );
+
+        // Find the data line that lives under the `event: error` block and
+        // parse it as JSON. A `split_once`-then-`lines` walk is simpler
+        // than a full SSE parser for one frame.
+        let error_section = body
+            .split("event: error\n")
+            .nth(1)
+            .expect("error event present");
+        let data_line = error_section
+            .lines()
+            .find(|l| l.starts_with("data: "))
+            .expect("data line under error event");
+        let json_str = data_line.strip_prefix("data: ").unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(json_str).expect("valid json in error frame");
+        assert_eq!(v["code"], serde_json::json!("decode_error"));
+        assert!(
+            v["payload"]["message"].is_string(),
+            "payload.message should be a string; got {v}"
+        );
+
+        let error_idx = body.find("event: error").unwrap();
+        let end_idx = body
+            .find("event: end")
+            .expect("missing event:end after event:error");
+        assert!(
+            end_idx > error_idx,
+            "event:end must follow event:error; body was:\n{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn subscription_with_no_input_param_decodes_as_null() {
+        // SPEC §4.2 doesn't require `?input=` — a unit-input subscription
+        // should be reachable as bare `/rpc/<name>`. The router decodes a
+        // missing param to JSON `null`, so the handler runs normally and
+        // emits its frames (here: a single Data(0)) plus the closing
+        // `event: end`. Without this contract every unit-input subscription
+        // would need a redundant `?input=null` on its URL.
+        let app = Router::new()
+            .procedure(make_stream_descriptor("ticks", counting_stream_handler(1)))
+            .into_axum();
+
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("GET")
+                    .uri("/rpc/ticks")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&bytes).expect("utf8 body");
+
+        assert!(
+            body.contains("event: data\ndata: 0\n\n"),
+            "expected single data frame for null input; body was:\n{body}"
+        );
+        assert!(
+            body.contains("event: end"),
+            "missing event:end; body was:\n{body}"
         );
     }
 }

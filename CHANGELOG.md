@@ -19,6 +19,41 @@ Each entry below MUST note an IR or wire bump if one happened.
 
 ---
 
+## [Unreleased] — Phase 3
+
+### Added
+- `#[rpc(stream)]` attribute now expands to a real subscription descriptor.
+  Supports `async fn name(input: I) -> impl futures::Stream<Item = T> + Send + 'static`.
+- `taut_rpc::ProcedureBody::{Unary, Stream}` enum — descriptor's body field is
+  now a sum type. `taut_rpc::StreamFrame::{Data, Error}` is the per-frame
+  value emitted by `StreamHandler`.
+- SSE dispatch in `Router::into_axum()`: subscription procedures mount
+  `GET /rpc/<name>?input=<urlencoded-json>` and emit
+  `event: data` / `event: error` / `event: end` frames per SPEC §4.2.
+- WebSocket transport behind cargo feature `ws`. Mounts `GET /rpc/_ws` and
+  multiplexes subscriptions via the `WsMessage` wire types.
+- `async-stream` is a runtime dependency to support the macro's expansion.
+- Phase 3 example: `examples/phase3-counter/` — a tick counter visible from
+  a TS `for await` loop.
+- Documentation: `docs/src/guides/subscriptions.md` rewritten from placeholder.
+
+### Changed
+- `ProcedureDescriptor.handler` field renamed to `body` and re-typed from
+  `ProcedureHandler` (a unary closure) to `ProcedureBody` (an enum). The
+  legacy `ProcedureHandler` type alias still resolves to `UnaryHandler`.
+- `#[rpc]` macro emission now wraps unary handlers in `ProcedureBody::Unary(...)`.
+
+### IR
+- IR_VERSION still 0. Subscription procedures' `kind = Subscription` was
+  already in the IR shape; this phase wires it through to runtime dispatch.
+
+### Wire
+- SSE end-frame: canonical form is `event: end\ndata: \n\n`. The TS runtime
+  accepts `data:`-with-no-content too for tolerance.
+- WebSocket: feature-gated; server-side only in v0.1.
+
+---
+
 ## [Unreleased] — Phase 2
 
 ### Added

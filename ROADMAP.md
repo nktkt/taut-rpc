@@ -31,12 +31,12 @@ Target for the first stable release: **0.1.0**, scoped narrow on purpose. Anythi
 
 ## Phase 3 — Subscriptions
 
-- [ ] `#[rpc(stream)]` for `impl Stream<Item = T>` returns.
-- [ ] SSE transport on the server.
-- [ ] WS transport behind a feature flag.
-- [ ] Generated client exposes `AsyncIterable` for streams.
+- [x] `#[rpc(stream)]` for `impl Stream<Item = T>` returns.
+- [x] SSE transport on the server.
+- [x] WS transport behind a feature flag.
+- [x] Generated client exposes `AsyncIterable` for streams.
 
-**Exit criteria:** A counter that ticks once a second is observable from a TS `for await`.
+**Exit criteria:** A counter that ticks once a second is observable from a TS `for await`. *(landed on main 2026-05-06)*
 
 ## Phase 4 — Validation bridge
 

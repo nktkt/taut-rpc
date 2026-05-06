@@ -44,52 +44,113 @@ export class SseTransport implements Transport {
   subscribe<I, O, E>(name: string, input: I): AsyncIterable<O> {
     const opts = this.opts;
     const baseUrl = opts.url.replace(/\/+$/, "");
-    const url = `${baseUrl}/rpc/${encodeURIComponent(name)}?input=${encodeURIComponent(JSON.stringify(input))}`;
+    // Undefined input → JSON null so the URL has a parseable `?input=null`.
+    // BigInts in the input are downcast to JS numbers so JSON.stringify accepts
+    // them; values above 2^53 lose precision in this default mode (matches the
+    // HTTP transport's behaviour).
+    const inputJson = JSON.stringify(input ?? null, (_k, v) =>
+      typeof v === "bigint" ? Number(v) : v,
+    );
+    const url = `${baseUrl}/rpc/${encodeURIComponent(name)}?input=${encodeURIComponent(inputJson)}`;
 
+    // AbortController is created per-iteration so each `for await` loop owns
+    // its own cancellation handle. We expose abort() through the iterator's
+    // `return()` method (invoked by `break`, early `return`, or `throw`
+    // inside the consumer's loop), which cancels the in-flight fetch and the
+    // underlying ReadableStream — preventing leaked sockets on early exit.
     return {
-      [Symbol.asyncIterator]: async function* () {
-        const headers = new Headers({ accept: "text/event-stream" });
-        const extra = typeof opts.headers === "function" ? opts.headers() : (opts.headers ?? {});
-        for (const [k, v] of Object.entries(extra)) headers.set(k, v);
-
-        const resp = await (opts.fetch ?? globalThis.fetch)(url, { method: "GET", headers });
-        if (!resp.ok || !resp.body) {
-          let payload: unknown = await resp.text().catch(() => "");
-          throw new TautError("transport_error", payload, resp.status);
-        }
-
-        const reader = resp.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-
-        try {
-          while (true) {
-            const { value, done } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
-
-            // Split SSE events on double-newline.
-            let idx: number;
-            while ((idx = buffer.indexOf("\n\n")) >= 0) {
-              const raw = buffer.slice(0, idx);
-              buffer = buffer.slice(idx + 2);
-              const parsed = parseEvent(raw);
-              if (!parsed) continue;
-              if (parsed.event === "data") {
-                yield JSON.parse(parsed.data) as O;
-              } else if (parsed.event === "error") {
-                const err = JSON.parse(parsed.data) as { code: string; payload: unknown };
-                throw new TautError(err.code, err.payload, 0);
-              } else if (parsed.event === "end") {
-                return;
-              }
+      [Symbol.asyncIterator]: (): AsyncIterator<O> => {
+        const controller = new AbortController();
+        const inner = consume<O>(url, opts, controller.signal);
+        return {
+          next: () => inner.next(),
+          return: async (value?: O): Promise<IteratorResult<O>> => {
+            controller.abort();
+            // Drain the inner generator so its `finally` runs and the reader
+            // releases its lock. The fetch abort surfaces as an AbortError on
+            // the in-flight read; swallow it on the cancellation path so
+            // `break` is clean.
+            try {
+              await inner.return();
+            } catch {
+              /* ignore abort propagation */
             }
-          }
-        } finally {
-          reader.releaseLock?.();
-        }
+            return { value: value as O, done: true };
+          },
+          throw: async (err?: unknown): Promise<IteratorResult<O>> => {
+            controller.abort();
+            // Forward to the inner generator so its finally runs, then
+            // re-throw to honor the iterator-protocol contract.
+            try {
+              return await inner.throw(err);
+            } catch (e) {
+              throw e;
+            }
+          },
+        };
       },
     };
+  }
+}
+
+/**
+ * Internal: drive the SSE wire format as an async generator.
+ *
+ * Lives outside `subscribe` so it can be returned as a real `AsyncGenerator`
+ * (with proper `return`/`throw` plumbing). The outer iterator wraps this and
+ * adds an AbortController so consumer-driven cancellation actually cancels
+ * the in-flight fetch.
+ */
+async function* consume<O>(
+  url: string,
+  opts: SseTransportOptions,
+  signal: AbortSignal,
+): AsyncGenerator<O, void, unknown> {
+  const headers = new Headers({ accept: "text/event-stream" });
+  const extra = typeof opts.headers === "function" ? opts.headers() : (opts.headers ?? {});
+  for (const [k, v] of Object.entries(extra)) headers.set(k, v);
+
+  const resp = await (opts.fetch ?? globalThis.fetch)(url, { method: "GET", headers, signal });
+  if (!resp.ok || !resp.body) {
+    let payload: unknown = await resp.text().catch(() => "");
+    throw new TautError("transport_error", payload, resp.status);
+  }
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      // Split SSE events on double-newline.
+      let idx: number;
+      while ((idx = buffer.indexOf("\n\n")) >= 0) {
+        const raw = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        const parsed = parseEvent(raw);
+        if (!parsed) continue;
+        if (parsed.event === "data") {
+          yield JSON.parse(parsed.data) as O;
+        } else if (parsed.event === "error") {
+          const err = JSON.parse(parsed.data) as { code: string; payload: unknown };
+          throw new TautError(err.code, err.payload, 0);
+        } else if (parsed.event === "end") {
+          return;
+        }
+        // Other event types are silently ignored (SPEC §4.2 lists exactly
+        // three, but a forward-compatible parser shouldn't blow up).
+      }
+    }
+  } finally {
+    // cancel() releases the lock and signals the underlying stream to stop
+    // pulling from the network. Safe to call even after abort: by then the
+    // body is already errored and cancel() resolves quickly.
+    try { await reader.cancel(); } catch { /* ignore */ }
+    reader.releaseLock?.();
   }
 }
 

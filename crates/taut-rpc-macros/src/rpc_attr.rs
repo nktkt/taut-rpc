@@ -1,4 +1,4 @@
-//! Expansion for the `#[rpc]` attribute macro (Phase 1).
+//! Expansion for the `#[rpc]` attribute macro (Phases 1–3).
 //!
 //! Given an `async fn` of one of the supported shapes, this macro
 //!
@@ -7,16 +7,18 @@
 //!    that the runtime calls to register the procedure.
 //!
 //! The descriptor carries everything the server needs at request time
-//! (the JSON-in / JSON-out handler) and everything the codegen step needs
-//! at build time (the IR fragment plus reachable type definitions). See
-//! SPEC §2 (architecture), §3.3 (errors), §4.1 (wire format).
+//! (the JSON-in / JSON-out unary handler, or the JSON-in / `StreamFrame`-out
+//! subscription handler) and everything the codegen step needs at build time
+//! (the IR fragment plus reachable type definitions). See SPEC §2
+//! (architecture), §3.3 (errors), §4.1 (unary wire format), §4.2
+//! (subscription wire format).
 //!
-//! ## Supported shapes (Phase 1)
+//! ## Supported shapes
 //!
 //! ```ignore
 //! #[rpc]                         // query, POST
 //! #[rpc(mutation)]               // mutation, POST
-//! #[rpc(stream)]                 // subscription — Phase 3, currently a stub
+//! #[rpc(stream)]                 // subscription, GET (Phase 3)
 //! #[rpc(method = "GET")]         // accepted, currently still routed as POST
 //! ```
 //!
@@ -25,13 +27,29 @@
 //! Multi-argument procedures are deliberately rejected in v0.1 with a hint to
 //! wrap them in a struct.
 //!
-//! Return types may be either `T` (success-only) or `Result<T, E>`. In the
-//! `Result` case `E` is recorded in the IR as a procedure-level error type so
-//! the generated TS client can narrow per-procedure error unions.
+//! Unary return types may be either `T` (success-only) or `Result<T, E>`. In
+//! the `Result` case `E` is recorded in the IR as a procedure-level error type
+//! so the generated TS client can narrow per-procedure error unions.
 //!
 //! Error types in `Result<T, E>` returns must implement `taut_rpc::TautError`
 //! (use `#[derive(TautError)]`). The macro doesn't add an explicit
 //! where-clause; the trait bound is enforced when the trait methods are called.
+//!
+//! Subscription return types must be of the form
+//! `impl Stream<Item = T> [+ Send] [+ 'static]`. The trait path may be bare
+//! (`Stream`), `futures::Stream`, or `::futures::Stream`. The `Item` associated
+//! type binding is what defines the per-frame payload type.
+//!
+//! ## Crate dependency note
+//!
+//! The expansion for `#[rpc(stream)]` references `::async_stream::stream!` and
+//! `::futures::{pin_mut, StreamExt}`. Users do not need to add
+//! `async-stream`/`futures` to their own `Cargo.toml`: `taut-rpc` re-exports
+//! both crates as part of its public dependency surface (Agent 1 added
+//! `async-stream` to `taut-rpc`'s `[dependencies]`; `futures` was already
+//! transitively pulled in via the runtime). The emitted paths are absolute
+//! (`::async_stream::...` / `::futures::...`) so users only need to depend on
+//! `taut-rpc` itself.
 //!
 //! Errors are surfaced via `syn::Error`; the macro never panics on user input.
 
@@ -41,8 +59,8 @@ use syn::{
     parse::{Parse, ParseStream},
     parse2,
     spanned::Spanned,
-    FnArg, GenericArgument, Ident, ItemFn, LitStr, PathArguments, ReturnType, Token, Type,
-    TypePath,
+    FnArg, GenericArgument, Ident, ItemFn, LitStr, PathArguments, ReturnType, Token,
+    TraitBoundModifier, Type, TypeImplTrait, TypeParamBound, TypePath,
 };
 
 /// Variant of procedure declared by the attribute.
@@ -180,6 +198,55 @@ fn classify_return(output: &ReturnType) -> ReturnShape {
     }
 }
 
+/// For `#[rpc(stream)]`, dig the per-frame `Item = T` type out of an
+/// `impl Stream<Item = T> [+ Send] [+ 'static]` return type.
+///
+/// Accepts the `Stream` trait under any path prefix — bare `Stream`,
+/// `futures::Stream`, or `::futures::Stream` — by matching only on the final
+/// path segment. Extra trait bounds (`Send`, `Sync`) and lifetime bounds
+/// (`'static`) are tolerated and ignored: only the binding for the `Item`
+/// associated type is consumed.
+///
+/// Returns the bound `T` on success. Returns `None` if the return type is
+/// missing, isn't `impl Trait`, doesn't include a `Stream` trait bound, or
+/// the `Stream` bound has no `Item = T` associated-type binding.
+fn extract_stream_item(output: &ReturnType) -> Option<Type> {
+    let ty = match output {
+        ReturnType::Type(_, ty) => &**ty,
+        ReturnType::Default => return None,
+    };
+    let Type::ImplTrait(TypeImplTrait { bounds, .. }) = ty else {
+        return None;
+    };
+
+    for bound in bounds {
+        let TypeParamBound::Trait(tb) = bound else {
+            continue;
+        };
+        // We don't care about `?Sized`-style modifiers; just look at the path.
+        if !matches!(tb.modifier, TraitBoundModifier::None) {
+            continue;
+        }
+        let Some(last) = tb.path.segments.last() else {
+            continue;
+        };
+        if last.ident != "Stream" {
+            continue;
+        }
+        let PathArguments::AngleBracketed(args) = &last.arguments else {
+            continue;
+        };
+        for arg in &args.args {
+            if let GenericArgument::AssocType(assoc) = arg {
+                if assoc.ident == "Item" {
+                    return Some(assoc.ty.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Find the single non-receiver argument, if any. Returns:
 /// - `Ok(None)` for a zero-argument fn.
 /// - `Ok(Some(ty))` for a one-argument fn (the input type).
@@ -210,20 +277,10 @@ fn extract_input_type(func: &ItemFn) -> syn::Result<Option<Type>> {
     }
 }
 
-pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> {
-    let args: RpcArgs = parse2(attr)?;
-    let func: ItemFn = parse2(item)?;
-
-    // Phase 3 — subscriptions are not implemented yet. Per spec, emit a
-    // hard compile error pointing at the roadmap.
-    if matches!(args.kind, ProcKind::Stream) {
-        return Err(syn::Error::new(
-            func.sig.fn_token.span(),
-            "taut_rpc: subscriptions are not yet implemented; Phase 3 in ROADMAP.md",
-        ));
-    }
-
-    // Validate the function shape.
+/// Validation common to every `#[rpc]` shape: must be `async`, non-generic,
+/// non-variadic. Method receivers are rejected later by `extract_input_type`
+/// for a more specific message.
+fn validate_common(func: &ItemFn) -> syn::Result<()> {
     if func.sig.asyncness.is_none() {
         return Err(syn::Error::new(
             func.sig.fn_token.span(),
@@ -243,7 +300,26 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
             "taut_rpc: variadic procedures are not supported",
         ));
     }
+    Ok(())
+}
 
+pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> {
+    let args: RpcArgs = parse2(attr)?;
+    let func: ItemFn = parse2(item)?;
+
+    validate_common(&func)?;
+
+    match args.kind {
+        ProcKind::Query | ProcKind::Mutation => expand_unary(&func, args.kind),
+        ProcKind::Stream => expand_stream(&func),
+    }
+}
+
+/// Expansion for `#[rpc]` / `#[rpc(mutation)]` — the unary (request →
+/// response) shape. The emitted descriptor uses
+/// [`taut_rpc::ProcedureBody::Unary`] and threads the user's fn through a
+/// JSON decode → call → JSON encode pipeline.
+fn expand_unary(func: &ItemFn, kind: ProcKind) -> syn::Result<TokenStream> {
     let fn_ident = func.sig.ident.clone();
     let fn_name_str = fn_ident.to_string();
     let descriptor_ident = Ident::new(
@@ -251,11 +327,11 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
         Span::call_site(),
     );
 
-    let input_ty_opt = extract_input_type(&func)?;
+    let input_ty_opt = extract_input_type(func)?;
     let return_shape = classify_return(&func.sig.output);
 
     // Build the IR `ProcKind` and runtime `ProcKindRuntime` tokens.
-    let (ir_kind_tok, runtime_kind_tok) = match args.kind {
+    let (ir_kind_tok, runtime_kind_tok) = match kind {
         ProcKind::Query => (
             quote!(::taut_rpc::ir::ProcKind::Query),
             quote!(::taut_rpc::ProcKindRuntime::Query),
@@ -264,12 +340,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
             quote!(::taut_rpc::ir::ProcKind::Mutation),
             quote!(::taut_rpc::ProcKindRuntime::Mutation),
         ),
-        // Stream is short-circuited above; this arm is here only so the
-        // match is exhaustive without an `unreachable!`.
-        ProcKind::Stream => (
-            quote!(::taut_rpc::ir::ProcKind::Subscription),
-            quote!(::taut_rpc::ProcKindRuntime::Subscription),
-        ),
+        ProcKind::Stream => unreachable!("expand_unary called with ProcKind::Stream"),
     };
 
     // Tokens for the input side of the descriptor.
@@ -380,7 +451,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
 
     // Pull the rustdoc string out of the function's `#[doc = "..."]` attrs so
     // the IR (and ultimately the generated TS) keeps the user's documentation.
-    let doc_expr = extract_doc_expr(&func);
+    let doc_expr = extract_doc_expr(func);
 
     let descriptor = quote! {
         #[allow(non_snake_case)]
@@ -410,12 +481,175 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
                     doc: #doc_expr,
                 },
                 type_defs,
-                handler: ::std::sync::Arc::new(|__input_value: ::serde_json::Value| {
-                    ::std::boxed::Box::pin(async move {
-                        #decode_block
-                        #result_block
+                body: ::taut_rpc::ProcedureBody::Unary(
+                    ::std::sync::Arc::new(|__input_value: ::serde_json::Value| {
+                        ::std::boxed::Box::pin(async move {
+                            #decode_block
+                            #result_block
+                        })
                     })
-                }),
+                ),
+            }
+        }
+    };
+
+    Ok(quote! {
+        #func
+
+        #descriptor
+    })
+}
+
+/// Expansion for `#[rpc(stream)]` — subscriptions.
+///
+/// The user fn is `async fn name(input?: I) -> impl Stream<Item = T>`. We
+/// emit a [`taut_rpc::ProcedureBody::Stream`] handler that:
+///
+/// 1. Decodes `serde_json::Value` → `I` (or asserts JSON null for zero-arg).
+/// 2. `await`s the user's async fn to obtain the inner `Stream`.
+/// 3. Polls the inner stream and yields a [`taut_rpc::StreamFrame::Data`]
+///    per item (serialized via `serde_json::to_value`), or a
+///    [`taut_rpc::StreamFrame::Error`] on the first decode/serialization
+///    failure followed by a `return` to terminate the stream.
+///
+/// Subscriptions are addressable as `GET` per SPEC §4.2 (so they can be
+/// opened from an `EventSource`), distinct from the `POST` used by unary
+/// query/mutation procedures.
+fn expand_stream(func: &ItemFn) -> syn::Result<TokenStream> {
+    let fn_ident = func.sig.ident.clone();
+    let fn_name_str = fn_ident.to_string();
+    let descriptor_ident = Ident::new(
+        &format!("__taut_proc_{fn_name_str}"),
+        Span::call_site(),
+    );
+
+    let input_ty_opt = extract_input_type(func)?;
+
+    // The whole point of `#[rpc(stream)]` is the `impl Stream<Item = T>` shape.
+    // Anything else is rejected with a hint that mirrors the docs.
+    let item_ty = extract_stream_item(&func.sig.output).ok_or_else(|| {
+        syn::Error::new(
+            func.sig.output.span(),
+            "taut_rpc: #[rpc(stream)] requires `async fn ... -> impl Stream<Item = T>`",
+        )
+    })?;
+
+    // Tokens for the input side of the descriptor.
+    let input_ir_expr = match &input_ty_opt {
+        Some(ty) => quote!(<#ty as ::taut_rpc::TautType>::ir_type_ref()),
+        None => quote!(<() as ::taut_rpc::TautType>::ir_type_ref()),
+    };
+    let input_collect = match &input_ty_opt {
+        Some(ty) => quote!(<#ty as ::taut_rpc::TautType>::collect_type_defs(&mut type_defs);),
+        None => quote!(<() as ::taut_rpc::TautType>::collect_type_defs(&mut type_defs);),
+    };
+
+    // Output is the per-frame `Item` type — that's what shows up in the IR
+    // `output` slot for a subscription.
+    let output_ir_expr = quote!(<#item_ty as ::taut_rpc::TautType>::ir_type_ref());
+    let output_collect =
+        quote!(<#item_ty as ::taut_rpc::TautType>::collect_type_defs(&mut type_defs););
+
+    // Decode step inside the `async_stream::stream!` block.
+    //
+    // On decode failure we yield a single `StreamFrame::Error` and `return`.
+    // The wire layer will close the SSE stream after sending the error event;
+    // see SPEC §4.2.
+    let decode_block = if let Some(ty) = &input_ty_opt {
+        quote! {
+            let __input: #ty = match ::serde_json::from_value(__input_value) {
+                ::std::result::Result::Ok(v) => v,
+                ::std::result::Result::Err(__e) => {
+                    yield ::taut_rpc::StreamFrame::Error {
+                        code: ::std::string::String::from("decode_error"),
+                        payload: ::serde_json::json!({ "message": __e.to_string() }),
+                    };
+                    return;
+                }
+            };
+        }
+    } else {
+        quote! {
+            if !__input_value.is_null() {
+                yield ::taut_rpc::StreamFrame::Error {
+                    code: ::std::string::String::from("decode_error"),
+                    payload: ::serde_json::json!({ "message": "expected null input" }),
+                };
+                return;
+            }
+        }
+    };
+
+    // Call step: `await` the user's async fn to obtain the inner stream.
+    let call_expr = if input_ty_opt.is_some() {
+        quote!(#fn_ident(__input).await)
+    } else {
+        quote!(#fn_ident().await)
+    };
+
+    let doc_expr = extract_doc_expr(func);
+
+    let descriptor = quote! {
+        #[allow(non_snake_case)]
+        pub fn #descriptor_ident() -> ::taut_rpc::ProcedureDescriptor {
+            let input_ty = #input_ir_expr;
+            let output_ty = #output_ir_expr;
+            let mut type_defs: ::std::vec::Vec<::taut_rpc::ir::TypeDef> =
+                ::std::vec::Vec::new();
+            #input_collect
+            #output_collect
+            // Dedup type_defs by name, preserving first occurrence.
+            {
+                let mut seen = ::std::collections::HashSet::<::std::string::String>::new();
+                type_defs.retain(|d| seen.insert(d.name.clone()));
+            }
+            ::taut_rpc::ProcedureDescriptor {
+                name: #fn_name_str,
+                kind: ::taut_rpc::ProcKindRuntime::Subscription,
+                ir: ::taut_rpc::ir::Procedure {
+                    name: ::std::string::String::from(#fn_name_str),
+                    kind: ::taut_rpc::ir::ProcKind::Subscription,
+                    input: input_ty,
+                    output: output_ty,
+                    // Subscriptions never declare per-procedure error types in
+                    // v0.1: errors at the stream level are encoded as
+                    // `StreamFrame::Error { code, payload }` per SPEC §4.2.
+                    errors: ::std::vec::Vec::new(),
+                    // Subscriptions are GET so they can be opened by an
+                    // EventSource / equivalent (SPEC §4.2).
+                    http_method: ::taut_rpc::ir::HttpMethod::Get,
+                    doc: #doc_expr,
+                },
+                type_defs,
+                body: ::taut_rpc::ProcedureBody::Stream(
+                    ::std::sync::Arc::new(|__input_value: ::serde_json::Value| {
+                        ::std::boxed::Box::pin(::async_stream::stream! {
+                            #decode_block
+
+                            // Await the user's async fn to obtain the stream,
+                            // then pin it on the local stack so we can call
+                            // `.next()` against `&mut`.
+                            let __inner = #call_expr;
+                            ::futures::pin_mut!(__inner);
+                            while let ::std::option::Option::Some(__item) =
+                                ::futures::StreamExt::next(&mut __inner).await
+                            {
+                                match ::serde_json::to_value(&__item) {
+                                    ::std::result::Result::Ok(__v) => {
+                                        yield ::taut_rpc::StreamFrame::Data(__v);
+                                    }
+                                    ::std::result::Result::Err(__e) => {
+                                        yield ::taut_rpc::StreamFrame::Error {
+                                            code: ::std::string::String::from("serialization_error"),
+                                            payload: ::serde_json::json!({ "message": __e.to_string() }),
+                                        };
+                                        return;
+                                    }
+                                }
+                            }
+                        })
+                    })
+                ),
             }
         }
     };
@@ -615,15 +849,6 @@ mod tests {
     }
 
     #[test]
-    fn expand_stream_emits_phase3_error() {
-        let item = quote! {
-            async fn events() -> String { String::new() }
-        };
-        let err = expand(quote!(stream), item).unwrap_err();
-        assert!(err.to_string().contains("Phase 3"));
-    }
-
-    #[test]
     fn expand_rejects_multi_arg() {
         let item = quote! {
             async fn add(a: i32, b: i32) -> i32 { a + b }
@@ -641,6 +866,11 @@ mod tests {
         assert!(out.contains("__taut_proc_ping"));
         assert!(out.contains("ProcedureDescriptor"));
         assert!(out.contains("ProcKindRuntime :: Query"));
+        // Phase 3 contract: unary descriptors are wrapped in `ProcedureBody::Unary`.
+        assert!(
+            out.contains("ProcedureBody :: Unary"),
+            "expected unary handler to be wrapped in ProcedureBody::Unary, got: {out}"
+        );
     }
 
     #[test]
@@ -671,6 +901,134 @@ mod tests {
         assert!(
             !out.contains("unwrap_or (\"error\")"),
             "expected the `unwrap_or(\"error\")` fallback to be removed, got: {out}"
+        );
+    }
+
+    // ----- Phase 3: subscription expansion -----
+
+    #[test]
+    fn extract_stream_item_from_bare_stream() {
+        // `impl Stream<Item = u64>` → u64
+        let rt: ReturnType = parse_quote!(-> impl Stream<Item = u64>);
+        let item = extract_stream_item(&rt).expect("should extract Item");
+        assert_eq!(quote!(#item).to_string(), "u64");
+    }
+
+    #[test]
+    fn extract_stream_item_from_qualified_path() {
+        // `impl ::futures::Stream<Item = String> + Send + 'static` → String
+        let rt: ReturnType =
+            parse_quote!(-> impl ::futures::Stream<Item = String> + Send + 'static);
+        let item = extract_stream_item(&rt).expect("should extract Item");
+        assert_eq!(quote!(#item).to_string(), "String");
+    }
+
+    #[test]
+    fn extract_stream_item_from_futures_path() {
+        let rt: ReturnType = parse_quote!(-> impl futures::Stream<Item = MyMsg> + Send);
+        let item = extract_stream_item(&rt).expect("should extract Item");
+        assert_eq!(quote!(#item).to_string(), "MyMsg");
+    }
+
+    #[test]
+    fn extract_stream_item_returns_none_for_plain_type() {
+        let rt: ReturnType = parse_quote!(-> u64);
+        assert!(extract_stream_item(&rt).is_none());
+    }
+
+    #[test]
+    fn extract_stream_item_returns_none_when_item_binding_missing() {
+        // `impl Stream + Send` (no `Item =` binding) — we can't recover T.
+        let rt: ReturnType = parse_quote!(-> impl Stream + Send);
+        assert!(extract_stream_item(&rt).is_none());
+    }
+
+    #[test]
+    fn expand_stream_emits_subscription_descriptor() {
+        let item = quote! {
+            async fn ticks(input: TicksInput) -> impl futures::Stream<Item = u64> + Send + 'static {
+                ::futures::stream::empty()
+            }
+        };
+        let out = expand(quote!(stream), item).unwrap().to_string();
+        // Descriptor / fn naming.
+        assert!(out.contains("__taut_proc_ticks"));
+        assert!(out.contains("ProcedureDescriptor"));
+        // Subscription-shaped IR + runtime kinds.
+        assert!(
+            out.contains("ProcKindRuntime :: Subscription"),
+            "expected runtime kind Subscription, got: {out}"
+        );
+        assert!(
+            out.contains("ProcKind :: Subscription"),
+            "expected IR kind Subscription, got: {out}"
+        );
+        // Subscriptions are addressed via GET per SPEC §4.2.
+        assert!(
+            out.contains("HttpMethod :: Get"),
+            "expected HttpMethod::Get for subscription, got: {out}"
+        );
+        // Body is the streaming variant, built around `async_stream::stream!`.
+        assert!(
+            out.contains("ProcedureBody :: Stream"),
+            "expected ProcedureBody::Stream wrapping, got: {out}"
+        );
+        assert!(
+            out.contains("async_stream :: stream"),
+            "expected async_stream::stream! invocation, got: {out}"
+        );
+        // The `Item = u64` binding flows into the IR `output_ty` slot.
+        assert!(
+            out.contains("< u64 as :: taut_rpc :: TautType > :: ir_type_ref"),
+            "expected ir_type_ref<u64> for the Item type, got: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_stream_emits_descriptor_for_zero_input_fn() {
+        let item = quote! {
+            async fn server_time() -> impl futures::Stream<Item = String> + Send + 'static {
+                ::futures::stream::empty()
+            }
+        };
+        let out = expand(quote!(stream), item).unwrap().to_string();
+        assert!(out.contains("__taut_proc_server_time"));
+        // Zero-arg path: we assert the input is JSON null and yield a
+        // decode_error otherwise.
+        assert!(
+            out.contains("is_null"),
+            "expected zero-arg path to assert input_value.is_null(), got: {out}"
+        );
+        assert!(
+            out.contains("StreamFrame :: Error"),
+            "expected StreamFrame::Error emission for invalid zero-arg input, got: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_stream_rejects_non_async() {
+        // `fn` (no async) → standard "requires an async fn" error.
+        let item = quote! {
+            fn ticks() -> impl Stream<Item = u64> { ::futures::stream::empty() }
+        };
+        let err = expand(quote!(stream), item).unwrap_err();
+        assert!(
+            err.to_string().contains("requires an async fn"),
+            "expected user-friendly async-fn error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn expand_stream_rejects_non_stream_return() {
+        // `-> u64` with `#[rpc(stream)]` is invalid.
+        let item = quote! {
+            async fn ticks() -> u64 { 0 }
+        };
+        let err = expand(quote!(stream), item).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("impl Stream<Item = T>"),
+            "expected error pointing at `impl Stream<Item = T>`, got: {msg}"
         );
     }
 }

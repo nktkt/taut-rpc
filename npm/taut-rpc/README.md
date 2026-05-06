@@ -63,6 +63,14 @@ and gated by an `ir_version` field; mismatches are refused by codegen.
 
 ## Changelog
 
+## 0.0.0 — Phase 3
+
+- Subscriptions: `client.<name>.subscribe(input)` returns `AsyncIterable<T>`
+  for procedures generated as `kind: "subscription"`. Backed by the SSE
+  transport when no custom transport is configured.
+- SSE transport gained an AbortController, so breaking out of `for await`
+  cancels the underlying fetch and stops the stream cleanly.
+
 ## 0.0.0 — Phase 2
 
 - `assertTautError` and `errorMatch` helpers for narrower catch ergonomics.

@@ -115,10 +115,18 @@ Accept: text/event-stream
 
 event: data\ndata: <json>\n\n
 event: error\ndata: <json>\n\n
-event: end\ndata:\n\n
+event: end\ndata: \n\n
 ```
 
-WebSocket transport is identical at the message level but framed as JSON messages with `{ type, payload }`.
+The default subscription transport is **SSE**. WebSocket is **opt-in** via the
+`ws` cargo feature on the `taut-rpc` crate; when enabled, the server mounts
+`GET /rpc/_ws` and multiplexes subscriptions over a single connection. WebSocket
+transport is identical at the message level but framed as JSON messages with
+`{ type, payload }`.
+
+The end-frame's canonical form is `event: end\ndata: \n\n` (a `data:` line with
+a single space). The TS parser tolerates either `data: \n` or no `data` line at
+all on the end frame.
 
 ## 5. Server API
 
@@ -147,6 +155,26 @@ let app = Router::new()
 ```
 
 Here `auth` runs first on the inbound path (it was added last), then `TraceLayer`, then the procedure handler. Reverse the calls to swap the order.
+
+### 5.1 Subscriptions
+
+```rust
+use taut_rpc::{rpc, Router};
+use futures::Stream;
+
+#[rpc(stream)]
+async fn ticks(input: TicksInput) -> impl Stream<Item = u64> + Send + 'static {
+    async_stream::stream! { /* ... */ }
+}
+
+let app = Router::new()
+    .procedure(__taut_proc_ticks())
+    .into_axum();
+```
+
+The `Send + 'static` bound on the returned `impl Stream` is **mandatory** — the
+runtime spawns the stream onto a task to drive SSE/WS frames, which requires
+both bounds.
 
 ## 6. Client API (generated)
 
@@ -210,8 +238,14 @@ delivers, before errors/middleware, subscriptions, and the validation bridge
 land in later phases):
 
 - `#[rpc]` on free `async fn`s with **0 or 1** input argument. Both queries
-  (default) and mutations are supported. `#[rpc(stream)]` is **not** in v0.1
-  (Phase 3). `#[rpc(method = "GET")]` is supported.
+  (default) and mutations are supported. `#[rpc(method = "GET")]` is supported.
+- `#[rpc(stream)]` for `async fn ... -> impl Stream<Item = T> + Send + 'static`
+  (Phase 3): **shipping in v0.1**.
+- SSE transport for subscriptions (Phase 3): **shipping in v0.1**.
+- WebSocket transport, feature-gated under `ws` (Phase 3): **shipping in v0.1**
+  on the server side; the TS client's WS transport is **deferred** past v0.1.
+- Generated client `.subscribe()` returning `AsyncIterable<T>` (Phase 3):
+  **shipping in v0.1**.
 - `#[derive(Type)]` for:
   - structs: named, tuple, newtype, unit;
   - enums: unit variants, tuple variants, struct variants.

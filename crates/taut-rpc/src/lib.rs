@@ -27,7 +27,10 @@ pub mod procedure;
 pub mod dump;
 
 pub use error::{StandardError, TautError};
-pub use procedure::{ProcedureDescriptor, ProcedureHandler, ProcedureResult};
+pub use procedure::{
+    ProcedureBody, ProcedureDescriptor, ProcedureHandler, ProcedureResult, StreamFrame,
+    StreamHandler, UnaryHandler,
+};
 pub use router::{ProcKindRuntime, Router};
 pub use types::TautType;
 pub use validate::{Constraint, Validate, ValidationError};

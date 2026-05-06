@@ -289,6 +289,14 @@ fn write_procedure_alias(out: &mut String, p: &Procedure, tm_opts: &type_map::Op
     let alias = procedure_alias_name(&p.name);
     let input = type_map::render_type(&p.input, tm_opts);
     let output = type_map::render_type(&p.output, tm_opts);
+    // Phase 3: surface the subscription dispatch hint in IntelliSense so
+    // callers see the `.subscribe(input)` shape on hover. The matching
+    // type-level dispatch lives in `ClientOf<P>` (see npm/taut-rpc/src/index.ts).
+    if matches!(p.kind, taut_rpc::ir::ProcKind::Subscription) {
+        out.push_str(
+            "/** Subscription procedure — call via `.subscribe(input)`, returns AsyncIterable. */\n",
+        );
+    }
     let _ = writeln!(
         out,
         "// kind: {kind:?}, http: {method:?}, name: {name}",
@@ -911,6 +919,56 @@ mod tests {
         assert!(
             s.contains("} as const satisfies Record<keyof Procedures, \"query\" | \"mutation\" | \"subscription\">;"),
             "as-const-satisfies tail missing:\n{s}"
+        );
+    }
+
+    #[test]
+    fn subscription_procedure_emits_subscription_kind_in_alias_and_kinds_map() {
+        let ir = Ir {
+            ir_version: Ir::CURRENT_VERSION,
+            procedures: vec![Procedure {
+                name: "ticker".to_string(),
+                kind: ProcKind::Subscription,
+                input: TypeRef::Primitive(Primitive::U32),
+                output: TypeRef::Primitive(Primitive::String),
+                errors: vec![],
+                http_method: HttpMethod::Get,
+                doc: None,
+            }],
+            types: vec![],
+        };
+        let s = render_ts(&ir, &opts_no_validator());
+        // (1) The ProcedureDef carries the `"subscription"` literal — this is
+        // what `ClientOf<P>` keys off to dispatch to `.subscribe(input)`.
+        assert!(
+            s.contains(
+                "export type Proc_ticker = ProcedureDef<number, string, never, \"subscription\">;"
+            ),
+            "subscription proc alias wrong:\n{s}"
+        );
+        // (2) The runtime kinds map records `"subscription"` (not `"query"`).
+        assert!(
+            s.contains("\"ticker\": \"subscription\","),
+            "procedureKinds entry must record subscription kind:\n{s}"
+        );
+        // (3) The JSDoc hint is emitted above the alias so editors surface the
+        //     `.subscribe(input)` shape on hover.
+        assert!(
+            s.contains(
+                "/** Subscription procedure — call via `.subscribe(input)`, returns AsyncIterable. */"
+            ),
+            "subscription JSDoc hint missing:\n{s}"
+        );
+        // Sanity: the JSDoc must precede the `Proc_ticker` alias declaration.
+        let jsdoc_idx = s
+            .find("Subscription procedure — call via")
+            .expect("jsdoc present");
+        let alias_idx = s
+            .find("export type Proc_ticker =")
+            .expect("alias present");
+        assert!(
+            jsdoc_idx < alias_idx,
+            "JSDoc must precede the type alias:\n{s}"
         );
     }
 
