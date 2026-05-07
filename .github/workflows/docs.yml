@@ -30,7 +30,7 @@ jobs:
     # TODO: drop continue-on-error once the book renders without warnings.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: peaceiris/actions-mdbook@v2
         with:
           mdbook-version: 'latest'
