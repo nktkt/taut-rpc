@@ -322,6 +322,13 @@ createApi({ schemas: procedureSchemas, validate: { send: false, recv: false } })
   `text/plain` body `ok` with status 200. Simple by design; if monitoring tools
   push for a JSON `{ "status": "ok", "version": "..." }` shape we'll revisit
   in v0.2.
+- **Version endpoint.** *Decided in Phase 5.* `GET /rpc/_version` returns
+  `application/json` body `{ "taut_rpc": "<crate-version>", "ir_version":
+  <u32> }` with status 200. Kept separate from `_health` so the latter's
+  text/plain shape stays stable for monitoring tools — `_version` is the
+  place to scrape build/IR-schema info. `taut_rpc` is the `taut-rpc` crate
+  version (read from `CARGO_PKG_VERSION` at compile time); `ir_version`
+  mirrors `crate::IR_VERSION` and the value emitted under `/rpc/_ir`.
 
 ## 9. Compatibility & versioning
 

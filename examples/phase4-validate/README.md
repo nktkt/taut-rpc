@@ -146,3 +146,12 @@ to the same envelope shape if any field fails.
   network call, while the same constraint violation on the server side
   surfaces as a structured error" — running this end-to-end by hand is the
   test for now.
+
+## See also
+
+- The [Phase 1 example](../phase1/README.md) — the `#[rpc]` + codegen baseline; this example layers `#[derive(Validate)]` on top of the same input-type pattern.
+- The [Phase 2 auth example](../phase2-auth/README.md) — pairs middleware-level rejection with the same SPEC §4.1 envelope this example uses for `validation_error`.
+- The [Phase 3 subscriptions example](../phase3-counter/README.md) — applies the same `Validate` derive to a streaming procedure's input (`TicksInput`).
+- [Guide: Validation](../../docs/src/guides/validation.md) — every supported v0.1 constraint, with examples and recipes.
+- [Tutorial: Form validation](../../docs/src/tutorials/form-validation.md) — wires the generated Valibot schemas into a UI form end-to-end.
+- [Concepts: Validation](../../docs/src/concepts/validation.md) — why the schema flows from Rust through the IR to Valibot, and what "validate by default" means on each side.

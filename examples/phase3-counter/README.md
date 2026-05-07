@@ -142,3 +142,11 @@ each frame arrives.
 - It is **not** wired into any test harness yet. The exit criterion for
   Phase 3 is "a counter that ticks once a second is observable from a TS
   `for await`" — running this end-to-end by hand is the test for now.
+
+## See also
+
+- The [Phase 1 example](../phase1/README.md) — the unary query/mutation baseline this builds on; subscriptions reuse the same `#[derive(Type)]` + codegen pipeline.
+- The [Phase 4 validation example](../phase4-validate/README.md) — pairs with the `TicksInput` constraints used here; same `Validate` derive, applied to a unary mutation.
+- [Guide: Subscriptions](../../docs/src/guides/subscriptions.md) — `#[rpc(stream)]`, SSE framing, backpressure, and cancellation patterns.
+- [Tutorial: Realtime chat](../../docs/src/tutorials/realtime-chat.md) — uses the same streaming primitives end-to-end for a multi-user feed.
+- [Concepts: Wire format](../../docs/src/concepts/wire-format.md) — the SPEC §4.2 SSE envelope (`event: data` / `event: end`) this example produces.

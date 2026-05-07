@@ -1,22 +1,26 @@
 ## Summary
+<!-- 1-3 sentences. Reference any issue this fixes. -->
 
-<!-- What does this PR change, and why? Keep it concise. -->
+## SPEC / Roadmap link
+<!-- e.g. SPEC §7, ROADMAP Phase 5. If your PR adds a new feature
+that the SPEC doesn't cover yet, draft a SPEC change first. -->
 
-## Spec / Roadmap link
-
-<!-- Link the SPEC.md section, ROADMAP.md item, or issue this PR addresses. -->
+## Changes
+<!-- Bulleted list of what this PR does. -->
 
 ## Test plan
+- [ ] `cargo test --workspace --all-targets` passes
+- [ ] `cargo clippy --workspace --all-targets -- -D warnings` clean
+- [ ] `cargo fmt --all -- --check` clean
+- [ ] Phase 0–4 examples still build (smoke check)
+- [ ] Updated documentation (concepts / guides / tutorials)
+- [ ] Updated CHANGELOG.md under `[Unreleased]`
+- [ ] If changing IR shape: bumped `IR_VERSION` + added SPEC §9.1 row + migration note
 
-<!-- How did you verify this change? Commands, manual steps, screenshots. -->
+## Breaking changes
+<!-- Y/N. If Y, describe what users need to do. -->
 
-- [ ] `cargo fmt --all -- --check`
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings`
-- [ ] `cargo test --workspace --all-targets`
+## Wire/IR impact
+<!-- Y/N for each. If wire format or IR shape changed, link the SPEC §9.1 row. -->
 
-## Checklist
-
-- [ ] `SPEC.md` updated if observable behaviour changed
-- [ ] `IR_VERSION` bumped if the IR changed
-- [ ] Public API changes documented
-- [ ] New code has tests where reasonable
+🤖 Generated with [Claude Code](https://claude.com/claude-code)

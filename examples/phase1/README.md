@@ -134,3 +134,12 @@ identifier rename happening across the language boundary.
   is "`cargo run` + `cargo taut gen` produces a working typed client for
   queries and mutations on a sample app" — running this end-to-end by hand is
   the test for now.
+
+## See also
+
+- The [Phase 0 smoke](../smoke/README.md) — the hand-written reference this example is built on.
+- The [Phase 2 auth example](../phase2-auth/README.md) — adds bearer-token middleware and typed `TautError` derives on top of this pipeline.
+- The [Phase 2 tracing example](../phase2-tracing/README.md) — drops `tower-http::TraceLayer` over the same router shape.
+- The [Phase 4 validation example](../phase4-validate/README.md) — adds `#[derive(Validate)]` constraints to the same kind of input types.
+- [Tutorial: Build a Todo app](../../docs/src/tutorials/todo-app.md) — uses these patterns end-to-end for queries and mutations.
+- [Concepts: How it works](../../docs/src/concepts/how-it-works.md) — explains the IR-dump + codegen flow this example walks through.

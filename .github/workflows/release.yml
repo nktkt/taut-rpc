@@ -1,0 +1,105 @@
+# Release workflow for taut-rpc.
+#
+# Triggered by pushing a `vX.Y.Z` tag. Verifies the workspace, publishes the
+# three crates to crates.io in dependency order, publishes the npm package,
+# and creates a GitHub release with notes extracted from CHANGELOG.md.
+#
+# Unlike CI, every job is required — failures must halt the release.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    continue-on-error: false
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --all-targets
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo fmt --all -- --check
+
+  publish-crates:
+    name: publish to crates.io
+    needs: verify
+    runs-on: ubuntu-latest
+    continue-on-error: false
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Publish taut-rpc-macros
+        run: cargo publish -p taut-rpc-macros --token "${{ secrets.CRATES_IO_TOKEN }}"
+      - name: Wait for crates.io to index taut-rpc-macros
+        run: sleep 30
+      - name: Publish taut-rpc
+        run: cargo publish -p taut-rpc --token "${{ secrets.CRATES_IO_TOKEN }}"
+      - name: Wait for crates.io to index taut-rpc
+        run: sleep 30
+      - name: Publish taut-rpc-cli
+        run: cargo publish -p taut-rpc-cli --token "${{ secrets.CRATES_IO_TOKEN }}"
+
+  publish-npm:
+    name: publish to npm
+    needs: verify
+    runs-on: ubuntu-latest
+    continue-on-error: false
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Install, build, and publish
+        working-directory: npm/taut-rpc
+        run: |
+          npm install
+          npm run build
+          npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  gh-release:
+    name: github release
+    needs: [publish-crates, publish-npm]
+    runs-on: ubuntu-latest
+    continue-on-error: false
+    steps:
+      - uses: actions/checkout@v6
+      - name: Extract release notes from CHANGELOG.md
+        id: notes
+        run: |
+          tag='${{ github.ref_name }}'
+          version="${tag#v}"
+          # Print lines from the matching `## [X.Y.Z]` heading up to (but not
+          # including) the next `##` heading.
+          awk -v ver="$version" '
+            $0 ~ "^## \\[" ver "\\]" { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+          echo "Release notes for $tag:"
+          cat release-notes.md
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          body_path: release-notes.md
+          draft: false
+          prerelease: false

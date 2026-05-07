@@ -1,11 +1,27 @@
 {
   "name": "taut-rpc",
-  "version": "0.0.0",
-  "description": "TypeScript runtime for taut-rpc — end-to-end type-safe RPC for Rust↔TS",
+  "version": "0.1.0",
+  "description": "TypeScript runtime for taut-rpc — end-to-end type-safe RPC between Rust (axum) and TypeScript clients.",
+  "keywords": [
+    "rpc",
+    "axum",
+    "rust",
+    "typescript",
+    "validation",
+    "valibot",
+    "zod",
+    "sse"
+  ],
+  "homepage": "https://github.com/nktkt/taut-rpc",
+  "bugs": {
+    "url": "https://github.com/nktkt/taut-rpc/issues"
+  },
+  "author": "taut-rpc contributors",
   "license": "(MIT OR Apache-2.0)",
   "repository": {
     "type": "git",
-    "url": "https://github.com/nktkt/taut-rpc.git"
+    "url": "https://github.com/nktkt/taut-rpc.git",
+    "directory": "npm/taut-rpc"
   },
   "type": "module",
   "main": "./dist/index.js",
@@ -13,19 +29,23 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./client": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./http": {
       "types": "./dist/http.d.ts",
-      "import": "./dist/http.js"
+      "import": "./dist/http.js",
+      "default": "./dist/http.js"
     },
     "./sse": {
       "types": "./dist/sse.d.ts",
-      "import": "./dist/sse.js"
+      "import": "./dist/sse.js",
+      "default": "./dist/sse.js"
     }
   },
   "files": [

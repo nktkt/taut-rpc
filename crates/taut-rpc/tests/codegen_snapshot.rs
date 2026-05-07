@@ -62,7 +62,7 @@ fn render_ts_for_phase1_example_contains_expected_anchors() {
     let out = render_ts(&ir, &CodegenOptions::default());
 
     // Header banner — generated files must be obvious to reviewers.
-    assert!(out.contains("DO NOT EDIT"), "header banner missing:\n{out}",);
+    assert!(out.contains("DO NOT EDIT"), "header banner missing:\n{out}");
 
     // Type definition — the input struct surfaces as a TS interface.
     assert!(

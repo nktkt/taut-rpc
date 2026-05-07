@@ -7,7 +7,7 @@
 //! - `#[rpc]` emitting a `__taut_proc_<name>()` `ProcedureDescriptor` whose
 //!   IR fragment matches the function's signature.
 //! - `Router::into_axum()` serving those descriptors over HTTP per SPEC §4.1
-//!   (success / error / decode_error / not_found envelopes).
+//!   (success / error / `decode_error` / `not_found` envelopes).
 //!
 //! The codegen side (TypeScript output) is covered separately in
 //! `codegen_snapshot.rs`; these tests stay Rust-only.
@@ -150,6 +150,7 @@ fn derive_type_collect_recurses_into_field_types() {
 // ---------------------------------------------------------------------------
 
 #[rpc]
+#[allow(clippy::unused_async)] // `#[rpc]` requires `async fn` signatures
 async fn ping() -> String {
     "pong".to_string()
 }
@@ -206,6 +207,7 @@ struct AddInput {
 }
 
 #[rpc(mutation)]
+#[allow(clippy::unused_async)] // `#[rpc]` requires `async fn` signatures
 async fn add(input: AddInput) -> i32 {
     input.a + input.b
 }
@@ -239,7 +241,7 @@ async fn router_serves_typed_mutation_with_input_struct() {
 // ---------------------------------------------------------------------------
 
 /// A user-defined error type. With `#[derive(TautError)]` the macro picks the
-/// per-variant `code` (snake_case'd) and the default HTTP status (400).
+/// per-variant `code` (`snake_case`'d) and the default HTTP status (400).
 #[derive(serde::Serialize, taut_rpc::Type, taut_rpc::TautError, Debug)]
 #[serde(tag = "code", content = "payload", rename_all = "snake_case")]
 #[allow(dead_code)]
@@ -248,7 +250,7 @@ enum MyErr {
 }
 
 #[rpc]
-#[allow(clippy::unnecessary_wraps)]
+#[allow(clippy::unnecessary_wraps, clippy::unused_async)] // `#[rpc]` requires `async fn` signatures
 async fn fails() -> Result<i32, MyErr> {
     Err(MyErr::Boom {
         reason: "test".into(),
@@ -308,7 +310,7 @@ enum AuthErr {
 }
 
 #[rpc]
-#[allow(clippy::unnecessary_wraps)]
+#[allow(clippy::unnecessary_wraps, clippy::unused_async)] // `#[rpc]` requires `async fn` signatures
 async fn protected() -> Result<(), AuthErr> {
     Err(AuthErr::Unauthenticated)
 }

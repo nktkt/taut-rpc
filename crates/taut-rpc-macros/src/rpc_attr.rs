@@ -63,6 +63,20 @@ use syn::{
     TraitBoundModifier, Type, TypeImplTrait, TypeParamBound, TypePath,
 };
 
+/// Build a `syn::Error` whose message includes a pointer to the relevant SPEC
+/// section so users can find the rules behind a rejection. Format:
+///
+/// ```text
+/// taut_rpc: <msg>
+///   see SPEC §<spec_anchor>
+/// ```
+///
+/// `spec_anchor` is just the section number (e.g. `"5"`, `"3.2"`) — full URLs
+/// would bloat the diagnostic output.
+fn err(span: Span, msg: &str, spec_anchor: &str) -> syn::Error {
+    syn::Error::new(span, format!("taut_rpc: {msg}\n  see SPEC §{spec_anchor}"))
+}
+
 /// Variant of procedure declared by the attribute.
 #[derive(Debug, Clone, Copy)]
 enum ProcKind {
@@ -113,12 +127,13 @@ impl Parse for RpcArgs {
                 // accepted to keep call sites stable but is otherwise unused.
                 method_override = Some(lit.span());
             } else {
-                return Err(syn::Error::new(
+                return Err(err(
                     ident.span(),
-                    format!(
-                        "taut_rpc: unrecognised `#[rpc]` argument `{ident}`; \
+                    &format!(
+                        "unrecognised `#[rpc]` argument `{ident}`; \
                          expected one of `query`, `mutation`, `stream`, `method = \"...\"`"
                     ),
+                    "5",
                 ));
             }
 
@@ -257,9 +272,10 @@ fn extract_input_type(func: &ItemFn) -> syn::Result<Option<Type>> {
     // Reject methods up front for a clearer message than the multi-arg path
     // would produce.
     if let Some(FnArg::Receiver(rcv)) = inputs.first() {
-        return Err(syn::Error::new(
+        return Err(err(
             rcv.span(),
-            "taut_rpc: #[rpc] cannot be applied to methods; use a free-standing async fn",
+            "#[rpc] cannot be applied to methods; use a free-standing async fn",
+            "5",
         ));
     }
 
@@ -269,10 +285,11 @@ fn extract_input_type(func: &ItemFn) -> syn::Result<Option<Type>> {
             FnArg::Typed(pat_type) => Ok(Some((*pat_type.ty).clone())),
             FnArg::Receiver(_) => unreachable!("handled above"),
         },
-        _ => Err(syn::Error::new(
+        _ => Err(err(
             inputs.span(),
-            "taut_rpc: multi-argument procedures are not yet supported in v0.1; \
+            "multi-argument procedures are not yet supported in v0.1; \
              wrap your arguments in a struct that derives Type and Deserialize",
+            "5",
         )),
     }
 }
@@ -282,22 +299,25 @@ fn extract_input_type(func: &ItemFn) -> syn::Result<Option<Type>> {
 /// for a more specific message.
 fn validate_common(func: &ItemFn) -> syn::Result<()> {
     if func.sig.asyncness.is_none() {
-        return Err(syn::Error::new(
+        return Err(err(
             func.sig.fn_token.span(),
-            "taut_rpc: #[rpc] requires an async fn",
+            "#[rpc] requires an async fn",
+            "5",
         ));
     }
     if !func.sig.generics.params.is_empty() || func.sig.generics.where_clause.is_some() {
-        return Err(syn::Error::new(
+        return Err(err(
             func.sig.generics.span(),
-            "taut_rpc: generic procedures are not supported in v0.1; \
+            "generic procedures are not supported in v0.1; \
              monomorphise by writing a wrapper fn with concrete types",
+            "5",
         ));
     }
     if let Some(variadic) = &func.sig.variadic {
-        return Err(syn::Error::new(
+        return Err(err(
             variadic.span(),
-            "taut_rpc: variadic procedures are not supported",
+            "variadic procedures are not supported",
+            "5",
         ));
     }
     Ok(())
@@ -319,6 +339,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
 /// response) shape. The emitted descriptor uses
 /// [`taut_rpc::ProcedureBody::Unary`] and threads the user's fn through a
 /// JSON decode → call → JSON encode pipeline.
+#[allow(clippy::too_many_lines)] // mostly token-stream interpolation
 fn expand_unary(func: &ItemFn, kind: ProcKind) -> syn::Result<TokenStream> {
     let fn_ident = func.sig.ident.clone();
     let fn_name_str = fn_ident.to_string();
@@ -531,6 +552,7 @@ fn expand_unary(func: &ItemFn, kind: ProcKind) -> syn::Result<TokenStream> {
 /// Subscriptions are addressable as `GET` per SPEC §4.2 (so they can be
 /// opened from an `EventSource`), distinct from the `POST` used by unary
 /// query/mutation procedures.
+#[allow(clippy::too_many_lines)] // mostly token-stream interpolation
 fn expand_stream(func: &ItemFn) -> syn::Result<TokenStream> {
     let fn_ident = func.sig.ident.clone();
     let fn_name_str = fn_ident.to_string();
@@ -541,9 +563,10 @@ fn expand_stream(func: &ItemFn) -> syn::Result<TokenStream> {
     // The whole point of `#[rpc(stream)]` is the `impl Stream<Item = T>` shape.
     // Anything else is rejected with a hint that mirrors the docs.
     let item_ty = extract_stream_item(&func.sig.output).ok_or_else(|| {
-        syn::Error::new(
+        err(
             func.sig.output.span(),
-            "taut_rpc: #[rpc(stream)] requires `async fn ... -> impl Stream<Item = T>`",
+            "#[rpc(stream)] requires `async fn ... -> impl Stream<Item = T>`",
+            "5.1",
         )
     })?;
 

@@ -10,9 +10,9 @@
 //!   `ProcKind::Subscription` with `http_method = HttpMethod::Get`.
 //! - `Router::new().procedure(...).into_axum()` mounts a `GET /rpc/<name>`
 //!   route for every subscription procedure that emits SPEC §4.2 SSE frames:
-//!     `event: data\ndata: <json>\n\n`   for each yielded item,
-//!     `event: error\ndata: <{...}>\n\n` for `StreamFrame::Error`,
-//!     `event: end\ndata: \n\n`         once the underlying stream finishes.
+//!   `event: data\ndata: <json>\n\n`   for each yielded item,
+//!   `event: error\ndata: <{...}>\n\n` for `StreamFrame::Error`,
+//!   `event: end\ndata: \n\n`         once the underlying stream finishes.
 //! - The same router can host both unary (POST) and streaming (GET) procedures
 //!   and each kind only responds to its own HTTP method.
 //!
@@ -55,6 +55,7 @@ struct TicksInput {
 /// Uses `async_stream::stream!` to build an `impl Stream<Item = u64>`, which
 /// is the canonical Phase 3 shape per SPEC §5.1.
 #[taut_rpc::rpc(stream)]
+#[allow(clippy::unused_async)] // `#[rpc(stream)]` requires `async fn` signatures
 async fn ticks(input: TicksInput) -> impl futures::Stream<Item = u64> + Send + 'static {
     async_stream::stream! {
         for i in 0..input.count {
@@ -69,6 +70,7 @@ async fn ticks(input: TicksInput) -> impl futures::Stream<Item = u64> + Send + '
 /// deserialization at all — proves zero-arg `#[rpc(stream)]` works and that
 /// the router handles the no-`?input=` URL form.
 #[taut_rpc::rpc(stream)]
+#[allow(clippy::unused_async)] // `#[rpc(stream)]` requires `async fn` signatures
 async fn ticks_simple() -> impl futures::Stream<Item = u32> + Send + 'static {
     async_stream::stream! {
         for i in 0..3u32 {
@@ -80,6 +82,7 @@ async fn ticks_simple() -> impl futures::Stream<Item = u32> + Send + 'static {
 /// Plain unary query, used by the "unary + stream coexist" test to prove
 /// `Router::new().procedure(...).procedure(...).into_axum()` can mix the two.
 #[taut_rpc::rpc]
+#[allow(clippy::unused_async)] // `#[rpc]` requires `async fn` signatures
 async fn ping_unary() -> String {
     "pong".to_string()
 }

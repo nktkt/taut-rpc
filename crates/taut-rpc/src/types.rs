@@ -37,6 +37,26 @@ use crate::ir::{Primitive, TypeDef, TypeRef};
 /// See the [module docs](self) for an overview. Implementations of this trait
 /// are the contract every other Phase 1 component (proc-macro, router,
 /// codegen) depends on; the trait shape itself is fixed for v0.
+///
+/// # Examples
+///
+/// User types acquire their `TautType` impl via `#[derive(Type)]`; the
+/// derive walks every field and emits the `ir_type_ref` / `ir_type_def` /
+/// `collect_type_defs` body for you:
+///
+/// ```rust,ignore
+/// use taut_rpc::Type;
+///
+/// #[derive(Type, serde::Serialize, serde::Deserialize)]
+/// pub struct User {
+///     pub id: u64,
+///     pub name: String,
+///     pub friends: Vec<u64>,
+/// }
+/// ```
+///
+/// Once derived, `User` (and any container that nests it, such as
+/// `Option<User>` or `Vec<User>`) is usable as an `#[rpc]` input or output.
 pub trait TautType {
     /// How this type is referenced from another type's field, a procedure
     /// signature, or a container's type parameter.
@@ -46,6 +66,7 @@ pub trait TautType {
     ///
     /// Primitives and built-in containers return `None`. Types emitted by
     /// `#[derive(Type)]` return `Some(TypeDef)` describing their structure.
+    #[must_use]
     fn ir_type_def() -> Option<TypeDef> {
         None
     }
@@ -148,7 +169,9 @@ impl<T: TautType, const N: usize> TautType for [T; N] {
     }
 }
 
-impl<K: TautType, V: TautType> TautType for std::collections::HashMap<K, V> {
+impl<K: TautType, V: TautType, S: std::hash::BuildHasher> TautType
+    for std::collections::HashMap<K, V, S>
+{
     fn ir_type_ref() -> TypeRef {
         TypeRef::Map {
             key: Box::new(K::ir_type_ref()),

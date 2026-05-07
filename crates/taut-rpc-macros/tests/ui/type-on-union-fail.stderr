@@ -1,0 +1,6 @@
+error: taut_rpc: unions are not supported
+         see SPEC §3.2
+ --> tests/ui/type-on-union-fail.rs:4:1
+  |
+4 | union U {
+  | ^^^^^

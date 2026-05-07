@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 /// Request body for queries and mutations: `POST /rpc/<procedure>` with body `{ "input": ... }`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RpcRequest<I> {
+    /// Procedure input value.
     pub input: I,
 }
 
@@ -32,8 +33,16 @@ pub struct RpcRequest<I> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum RpcResponse<T, E> {
-    Ok { ok: T },
-    Err { err: E },
+    /// Successful response: `{ "ok": ... }`.
+    Ok {
+        /// Success payload.
+        ok: T,
+    },
+    /// Failure response: `{ "err": ... }`.
+    Err {
+        /// Error payload (typically an [`ErrEnvelope`]).
+        err: E,
+    },
 }
 
 impl<T, E> RpcResponse<T, E> {
@@ -49,7 +58,9 @@ impl<T, E> RpcResponse<T, E> {
 /// Error envelope per SPEC §3.3 / §4.1.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrEnvelope<P> {
+    /// Stable, machine-readable error code.
     pub code: String,
+    /// Error-specific payload data.
     pub payload: P,
 }
 
@@ -72,11 +83,15 @@ impl<P> ErrEnvelope<P> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum SubFrame<T, E> {
+    /// Successful payload frame.
     Data(T),
+    /// Error frame carrying a structured envelope.
     Error(ErrEnvelope<E>),
+    /// Terminal end-of-stream frame.
     End,
     /// Optional protocol-version marker (subscription only, per SPEC §9).
     V {
+        /// Protocol version number.
         v: u32,
     },
 }
@@ -90,18 +105,37 @@ pub enum SubFrame<T, E> {
 pub enum WsMessage<T, E> {
     /// Client -> server: subscribe to a procedure.
     Subscribe {
+        /// Client-chosen subscription identifier; multiplexes multiple streams.
         id: u64,
+        /// Target procedure name.
         procedure: String,
+        /// Procedure input value as raw JSON.
         input: serde_json::Value,
     },
     /// Client -> server: cancel.
-    Unsubscribe { id: u64 },
+    Unsubscribe {
+        /// Subscription identifier to cancel.
+        id: u64,
+    },
     /// Server -> client: data frame.
-    Data { id: u64, value: T },
+    Data {
+        /// Subscription identifier this frame belongs to.
+        id: u64,
+        /// Payload value.
+        value: T,
+    },
     /// Server -> client.
-    Error { id: u64, err: ErrEnvelope<E> },
+    Error {
+        /// Subscription identifier this error frame belongs to.
+        id: u64,
+        /// Error envelope.
+        err: ErrEnvelope<E>,
+    },
     /// Server -> client: stream ended normally.
-    End { id: u64 },
+    End {
+        /// Subscription identifier that ended.
+        id: u64,
+    },
 }
 
 #[cfg(test)]

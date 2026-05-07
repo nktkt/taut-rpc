@@ -11,11 +11,12 @@ publish = false
 [dependencies]
 taut-rpc = { path = "../../../crates/taut-rpc" }
 taut-rpc-macros = { path = "../../../crates/taut-rpc-macros" }
-axum = "0.7"
+axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-thiserror = "1"
-tower-http = { version = "0.5", features = ["trace"] }
+thiserror = "2"
+tower = { version = "0.4", features = ["util"] }
+tower-http = { version = "0.6", features = ["trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

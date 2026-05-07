@@ -1,0 +1,6 @@
+error: taut_rpc: generic types are not yet supported in v0.1; please monomorphize manually for now
+         see SPEC §3.2
+ --> tests/ui/type-on-generic-struct-fail.rs:4:9
+  |
+4 | struct G<T> {
+  |         ^

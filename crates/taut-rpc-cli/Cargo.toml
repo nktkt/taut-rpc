@@ -1,12 +1,16 @@
 [package]
 name = "taut-rpc-cli"
-version = "0.0.0"
-description = "cargo subcommand for taut-rpc codegen"
+version = "0.1.0"
+description = "cargo taut subcommand: TS codegen, IR drift detection, MCP manifest, and IR inspection for taut-rpc."
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+homepage = "https://github.com/nktkt/taut-rpc"
+documentation = "https://docs.rs/taut-rpc-cli"
+keywords = ["taut-rpc", "rpc", "codegen", "cli", "typescript"]
+categories = ["command-line-utilities", "development-tools::cargo-plugins"]
 
 [lib]
 name = "taut_rpc_cli"
@@ -21,7 +25,7 @@ clap.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-taut-rpc = { path = "../taut-rpc" }
+taut-rpc = { path = "../taut-rpc", version = "0.1.0" }
 
 [lints]
 workspace = true

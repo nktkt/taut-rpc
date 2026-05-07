@@ -143,3 +143,12 @@ Each line corresponds to one of the demo's five steps:
   `#[rpc]`, which is Phase 3.
 - Phase 4's input validation (`Validate`) also runs on this example's
   procedures — no-op here, since all three procedures take zero input fields.
+
+## See also
+
+- The [Phase 1 example](../phase1/README.md) — the `#[rpc]` + codegen baseline this builds on.
+- The [Phase 2 tracing example](../phase2-tracing/README.md) — sibling middleware example using `tower-http::TraceLayer` instead of an auth layer.
+- The [Phase 4 validation example](../phase4-validate/README.md) — adds typed input validation on top of the same envelope shape.
+- [Guide: Authentication](../../docs/src/guides/auth.md) — bearer-token, session, and role-check patterns at the layer level.
+- [Guide: Middleware](../../docs/src/guides/middleware.md) — composing `tower::Layer` stacks around a taut-rpc `Router`.
+- [Concepts: Errors](../../docs/src/concepts/errors.md) — the SPEC §3.3 / §4.1 envelope this example exercises end-to-end.

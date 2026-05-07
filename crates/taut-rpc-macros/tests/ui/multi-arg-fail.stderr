@@ -1,4 +1,5 @@
 error: taut_rpc: multi-argument procedures are not yet supported in v0.1; wrap your arguments in a struct that derives Type and Deserialize
+         see SPEC §5
  --> tests/ui/multi-arg-fail.rs:4:14
   |
 4 | async fn add(a: i32, b: i32) -> i32 {

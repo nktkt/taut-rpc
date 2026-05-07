@@ -64,11 +64,12 @@ pub struct CreateUser {
 /// covers the recv path).
 #[derive(Serialize, Deserialize, Type)]
 pub struct User {
-    /// `u32` rather than `u64` to keep the demo simple — the codegen emits
-    /// `v.bigint()` for `u64` outputs, but the wire JSON ships them as plain
-    /// JS numbers, so validating on `bigint` fails on the recv path. v0.2
-    /// will add a coercion adapter; until then `u32` skirts the issue.
-    pub id: u32,
+    /// `u64` — the codegen now emits a coercion-style schema for native-bigint
+    /// primitives (union of bigint/number/string + transform → bigint), so the
+    /// wire JSON's plain JS number round-trips cleanly into a `bigint` at
+    /// output-validation time. The TS-side type is still `bigint`, matching
+    /// SPEC §3.1.
+    pub id: u64,
     pub username: String,
 }
 

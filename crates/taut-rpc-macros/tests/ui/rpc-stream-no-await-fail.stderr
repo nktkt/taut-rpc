@@ -1,0 +1,6 @@
+error: taut_rpc: #[rpc] requires an async fn
+         see SPEC §5
+ --> tests/ui/rpc-stream-no-await-fail.rs:7:1
+  |
+7 | fn ticks() -> impl futures::Stream<Item = u64> + Send + 'static {
+  | ^^

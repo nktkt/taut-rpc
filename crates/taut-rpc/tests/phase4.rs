@@ -362,8 +362,8 @@ fn derive_validate_collects_multiple_errors() {
         codes.contains(&"length"),
         "expected a `length` violation in {codes:?}",
     );
-    assert!(paths.contains(&"age"), "expected `age` path in {paths:?}",);
-    assert!(paths.contains(&"name"), "expected `name` path in {paths:?}",);
+    assert!(paths.contains(&"age"), "expected `age` path in {paths:?}");
+    assert!(paths.contains(&"name"), "expected `name` path in {paths:?}");
 }
 
 // ---------------------------------------------------------------------------
@@ -440,6 +440,7 @@ struct CreateUser {
 }
 
 #[taut_rpc::rpc(mutation)]
+#[allow(clippy::unused_async)] // `#[rpc]` requires `async fn` signatures
 async fn create_user(input: CreateUser) -> u64 {
     // The handler shouldn't run for invalid inputs — the router rejects
     // before getting here. For valid inputs we simply hand back a stub id so

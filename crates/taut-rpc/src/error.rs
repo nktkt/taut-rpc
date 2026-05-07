@@ -54,6 +54,22 @@ use crate::validate::ValidationError;
 /// }
 /// ```
 ///
+/// A hand-written impl looks the same as what the derive expands to —
+/// match each variant to its stable `code` and HTTP status:
+///
+/// ```rust,ignore
+/// use taut_rpc::TautError;
+///
+/// #[derive(serde::Serialize)]
+/// #[serde(tag = "code", content = "payload", rename_all = "snake_case")]
+/// pub enum AddError { Overflow }
+///
+/// impl TautError for AddError {
+///     fn code(&self) -> &'static str { match self { Self::Overflow => "overflow" } }
+///     fn http_status(&self) -> u16 { 400 }
+/// }
+/// ```
+///
 /// For errors that map cleanly onto common HTTP semantics, prefer the built-in
 /// [`StandardError`] taxonomy.
 pub trait TautError: Serialize + Sized {
@@ -106,37 +122,58 @@ pub trait TautError: Serialize + Sized {
 pub enum StandardError {
     /// 400 — Malformed or syntactically invalid request.
     #[error("bad request: {message}")]
-    BadRequest { message: String },
+    BadRequest {
+        /// Human-readable description of why the request was rejected.
+        message: String,
+    },
     /// 400 — Server-side input validation rejected the request before the
     /// procedure ran. Carries the per-field failures that the validator
     /// collected. Serializes with the `validation_error` discriminant.
     #[error("validation failed")]
     #[serde(rename = "validation_error")]
-    ValidationFailed { errors: Vec<ValidationError> },
+    ValidationFailed {
+        /// Per-field validation failures collected by the validator.
+        errors: Vec<ValidationError>,
+    },
     /// 401 — Caller is not authenticated.
     #[error("unauthenticated")]
     Unauthenticated,
     /// 403 — Caller is authenticated but not permitted.
     #[error("forbidden: {reason}")]
-    Forbidden { reason: String },
+    Forbidden {
+        /// Human-readable explanation of why the caller was denied.
+        reason: String,
+    },
     /// 404 — Target resource does not exist.
     #[error("not found")]
     NotFound,
     /// 409 — State conflict (e.g. unique-key violation, optimistic-lock failure).
     #[error("conflict: {message}")]
-    Conflict { message: String },
+    Conflict {
+        /// Human-readable description of the conflict.
+        message: String,
+    },
     /// 422 — Request was syntactically valid but failed semantic validation.
     #[error("unprocessable entity: {message}")]
-    UnprocessableEntity { message: String },
+    UnprocessableEntity {
+        /// Human-readable description of the semantic failure.
+        message: String,
+    },
     /// 429 — Caller is being rate limited.
     #[error("rate limited (retry after {retry_after_seconds}s)")]
-    RateLimited { retry_after_seconds: u32 },
+    RateLimited {
+        /// Suggested delay before the caller retries, in seconds.
+        retry_after_seconds: u32,
+    },
     /// 500 — Unexpected server-side failure.
     #[error("internal error")]
     Internal,
     /// 503 — Service is temporarily unavailable (graceful degradation, deploys, etc.).
     #[error("service unavailable (retry after {retry_after_seconds}s)")]
-    ServiceUnavailable { retry_after_seconds: u32 },
+    ServiceUnavailable {
+        /// Suggested delay before the caller retries, in seconds.
+        retry_after_seconds: u32,
+    },
     /// 504 — Upstream or internal operation timed out.
     #[error("timeout")]
     Timeout,
@@ -159,6 +196,7 @@ impl TautError for StandardError {
         }
     }
 
+    #[allow(clippy::match_same_arms)] // arms kept distinct for variant-to-status traceability
     fn http_status(&self) -> u16 {
         match self {
             Self::BadRequest { .. } => 400,

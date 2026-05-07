@@ -61,10 +61,16 @@ pub type ProcedureHandler = UnaryHandler;
 /// `200 { "ok": <payload> }`; [`Self::Err`] becomes
 /// `<http_status> { "err": { "code", "payload" } }`.
 pub enum ProcedureResult {
+    /// Successful response — the JSON value sent back as `{"ok": ...}`.
     Ok(serde_json::Value),
+    /// Failure response — sent back as `{"err": {"code", "payload"}}` with
+    /// the given HTTP status.
     Err {
+        /// HTTP status code returned to the caller.
         http_status: u16,
+        /// Stable, machine-readable error code.
         code: String,
+        /// Error payload serialized into the wire envelope.
         payload: serde_json::Value,
     },
 }
@@ -108,6 +114,7 @@ impl ProcedureResult {
     /// Build [`ProcedureResult::Err`] from a [`crate::TautError`]. The payload
     /// is `serde_json::to_value(&e)`; if that fails the payload becomes
     /// `null` but `code` and `http_status` are still taken from the error.
+    #[allow(clippy::needless_pass_by_value)] // owned `e` matches macro-emitted call sites
     pub fn from_taut_error<E: crate::TautError>(e: E) -> Self {
         let code = e.code().to_string();
         let http_status = e.http_status();
@@ -122,6 +129,8 @@ impl ProcedureResult {
     /// Convenience helper for macro-emitted code: maps a `serde_json::Error`
     /// (typically from output serialization in the handler wrapper) to a
     /// uniform 500 `serialization_error` response.
+    #[must_use]
+    #[allow(clippy::needless_pass_by_value)] // owned arg matches macro-emitted call sites
     pub fn from_serialization(_e: serde_json::Error) -> Self {
         ProcedureResult::Err {
             http_status: 500,
@@ -159,7 +168,9 @@ pub enum StreamFrame {
     /// committed by the time SSE frames flow, so there's no status code to
     /// flip.)
     Error {
+        /// Stable error code emitted with the SSE error frame.
         code: String,
+        /// Error payload serialized into the SSE error frame.
         payload: serde_json::Value,
     },
 }
@@ -206,6 +217,7 @@ impl StreamFrame {
     /// after the HTTP status line is already committed, so per-frame status
     /// codes don't fit. Callers wanting status-mapping semantics should use a
     /// unary procedure instead.
+    #[allow(clippy::needless_pass_by_value)] // owned `e` matches macro-emitted call sites
     pub fn from_taut_error<E: crate::TautError>(e: E) -> Self {
         let code = e.code().to_string();
         let payload = serde_json::to_value(&e).unwrap_or(serde_json::Value::Null);
@@ -218,9 +230,27 @@ impl StreamFrame {
 ///
 /// `Clone` because [`UnaryHandler`] / [`StreamHandler`] are themselves `Arc`s
 /// — cloning a `ProcedureBody` just bumps refcounts.
+///
+/// # Examples
+///
+/// Pattern-match a descriptor's body to dispatch on the procedure flavor.
+/// This is the same shape the router itself uses internally:
+///
+/// ```rust,ignore
+/// use taut_rpc::procedure::{ProcedureBody, ProcedureDescriptor};
+///
+/// fn describe(desc: &ProcedureDescriptor) -> &'static str {
+///     match &desc.body {
+///         ProcedureBody::Unary(_) => "query or mutation",
+///         ProcedureBody::Stream(_) => "subscription",
+///     }
+/// }
+/// ```
 #[derive(Clone)]
 pub enum ProcedureBody {
+    /// Unary handler — used by queries and mutations (SPEC §4.1).
     Unary(UnaryHandler),
+    /// Streaming handler — used by subscriptions (SPEC §4.2).
     Stream(StreamHandler),
 }
 

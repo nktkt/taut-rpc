@@ -1,4 +1,4 @@
-//! Tests that the CLI rejects IRs with mismatched ir_version.
+//! Tests that the CLI rejects IRs with mismatched `ir_version`.
 
 // Note: the actual version-mismatch check is in `commands::gen::run`, which is
 // binary-only. These tests assert the underlying invariant: a stale-version IR

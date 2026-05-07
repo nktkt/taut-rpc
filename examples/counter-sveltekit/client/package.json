@@ -1,0 +1,29 @@
+{
+  "name": "counter-sveltekit-client",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "build-api": "cd ../../.. && cargo run -p taut-rpc-cli -- taut gen --from-binary examples/counter-sveltekit/server/target/debug/counter-sveltekit-server --out examples/counter-sveltekit/client/src/lib/api.gen.ts",
+    "typecheck": "svelte-kit sync && tsc --noEmit"
+  },
+  "dependencies": {
+    "@sveltejs/kit": "^2.0.0",
+    "svelte": "^4.0.0",
+    "taut-rpc": "file:../../../npm/taut-rpc",
+    "valibot": "^0.42.0"
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-static": "^3.0.0",
+    "@sveltejs/vite-plugin-svelte": "^3.0.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0",
+    "vite": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

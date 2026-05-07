@@ -61,6 +61,7 @@ enum Cmd {
     Mcp(commands::mcp::McpArgs),
 }
 
+#[allow(clippy::similar_names)] // `args` (subcommand args) vs `argv` (process args) are intentional
 fn main() -> Result<()> {
     // When invoked as `cargo taut <sub>`, Cargo passes argv as
     // ["cargo-taut", "taut", "<sub>", ...]. When invoked directly as

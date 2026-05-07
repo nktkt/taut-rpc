@@ -1,0 +1,6 @@
+error: taut_rpc: #[rpc] cannot be applied to methods; use a free-standing async fn
+         see SPEC §5
+ --> tests/ui/rpc-on-self-method-fail.rs:7:18
+  |
+7 |     async fn bar(&self) -> u32 {
+  |                  ^

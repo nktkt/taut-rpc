@@ -4,7 +4,7 @@
 //! expression string. It is purely syntactic; it does not validate that
 //! named types exist.
 //!
-//! The mapping table is the spec — see [`SPEC.md`] §3.1. Anything not
+//! The mapping table is the spec — see `SPEC.md` §3.1. Anything not
 //! covered there should be added to the spec first, then mirrored here.
 
 use crate::ir::{Primitive, TypeRef};
@@ -53,6 +53,7 @@ impl Default for Options {
 /// - `Option<String>` → `"string | null"`
 /// - `HashMap<String, User>` → `"Record<string, User>"`
 /// - `(i32, String)` → `"[number, string]"`
+#[must_use]
 pub fn render_type(t: &TypeRef, opts: &Options) -> String {
     match t {
         TypeRef::Primitive(p) => render_primitive(*p, opts).to_string(),
@@ -61,7 +62,9 @@ pub fn render_type(t: &TypeRef, opts: &Options) -> String {
         TypeRef::Vec(inner) => render_vec_like(inner, opts),
         TypeRef::Map { key, value } => render_map(key, value, opts),
         TypeRef::Tuple(elems) => render_tuple(elems, opts),
-        TypeRef::FixedArray { elem, len } => render_fixed_array(elem, *len as usize, opts),
+        TypeRef::FixedArray { elem, len } => {
+            render_fixed_array(elem, usize::try_from(*len).unwrap_or(usize::MAX), opts)
+        }
     }
 }
 
@@ -69,8 +72,13 @@ pub fn render_type(t: &TypeRef, opts: &Options) -> String {
 ///
 /// Returns `&'static str` because the result is always one of a fixed
 /// set of TS keywords / built-ins.
+#[must_use]
+#[allow(clippy::match_same_arms)] // arms kept distinct so per-variant SPEC comments stay attached
 pub fn render_primitive(p: Primitive, opts: &Options) -> &'static str {
-    use Primitive::*;
+    use Primitive::{
+        Bool, Bytes, DateTime, String, Unit, Uuid, F32, F64, I128, I16, I32, I64, I8, U128, U16,
+        U32, U64, U8,
+    };
     match p {
         Bool => "boolean",
         U8 | U16 | U32 | I8 | I16 | I32 | F32 | F64 => "number",
@@ -105,9 +113,9 @@ fn render_option(inner: &TypeRef, opts: &Options) -> String {
     // `Named` / `Primitive` / array / Record / tuple does not need
     // parens.
     if needs_parens_for_union(cur) {
-        format!("({}) | null", rendered)
+        format!("({rendered}) | null")
     } else {
-        format!("{} | null", rendered)
+        format!("{rendered} | null")
     }
 }
 
@@ -119,9 +127,9 @@ fn render_option(inner: &TypeRef, opts: &Options) -> String {
 fn render_vec_like(inner: &TypeRef, opts: &Options) -> String {
     let rendered = render_type(inner, opts);
     if needs_parens_for_array(inner) {
-        format!("({})[]", rendered)
+        format!("({rendered})[]")
     } else {
-        format!("{}[]", rendered)
+        format!("{rendered}[]")
     }
 }
 
@@ -130,10 +138,10 @@ fn render_vec_like(inner: &TypeRef, opts: &Options) -> String {
 fn render_map(key: &TypeRef, value: &TypeRef, opts: &Options) -> String {
     let v = render_type(value, opts);
     if is_string_keyed(key) {
-        format!("Record<string, {}>", v)
+        format!("Record<string, {v}>")
     } else {
         let k = render_type(key, opts);
-        format!("Array<[{}, {}]>", k, v)
+        format!("Array<[{k}, {v}]>")
     }
 }
 
@@ -162,15 +170,9 @@ fn render_fixed_array(elem: &TypeRef, len: usize, opts: &Options) -> String {
     // Fallback: too long for a tuple. Keep it as an array and leave a
     // breadcrumb in the rendered output so reviewers notice.
     if needs_parens_for_array(elem) {
-        format!(
-            "/* TODO: fixed-size [{}; {}] */ ({})[]",
-            rendered, len, rendered
-        )
+        format!("/* TODO: fixed-size [{rendered}; {len}] */ ({rendered})[]")
     } else {
-        format!(
-            "/* TODO: fixed-size [{}; {}] */ {}[]",
-            rendered, len, rendered
-        )
+        format!("/* TODO: fixed-size [{rendered}; {len}] */ {rendered}[]")
     }
 }
 
@@ -192,9 +194,7 @@ fn needs_parens_for_array(t: &TypeRef) -> bool {
 fn is_string_keyed(key: &TypeRef) -> bool {
     matches!(
         key,
-        TypeRef::Primitive(Primitive::String)
-            | TypeRef::Primitive(Primitive::Uuid)
-            | TypeRef::Primitive(Primitive::DateTime)
+        TypeRef::Primitive(Primitive::String | Primitive::Uuid | Primitive::DateTime)
     )
 }
 

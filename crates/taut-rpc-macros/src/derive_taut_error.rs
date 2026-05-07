@@ -14,31 +14,53 @@
 //!
 //! Both can be combined: `#[taut(code = "auth_required", status = 401)]`.
 //!
-//! # Relationship to the serde wire shape
+//! # `#[taut(...)]` namespace ownership (Phase 5 audit)
 //!
-//! This derive ONLY emits the `TautError` trait impl. It does NOT emit
-//! `#[derive(Serialize)]` or `#[serde(tag = "code", content = "payload",
-//! rename_all = "snake_case")]`. Users must add those themselves on the same
-//! type — the SPEC §4.1 wire envelope (`{ "err": { "code": ..., "payload": ... } }`)
-//! is produced by serde, while `code()` / `http_status()` are produced by this
-//! derive. Keeping the two concerns separate lets users opt out of serde's tag
-//! conventions when they need a custom serializer while still getting the
-//! `TautError` impl for free.
+//! The `#[taut(...)]` attribute is shared across three derives so a user can
+//! decorate one type with `#[derive(Type, Validate, TautError)]` and write a
+//! single attribute block per variant/field. Each derive owns a disjoint set
+//! of keys and MUST silently consume any key it doesn't own (without erroring)
+//! so the others can claim it. Ownership map:
+//!
+//! | Position             | Owned by `Type`            | Owned by `Validate`                                         | Owned by `TautError`   |
+//! |----------------------|----------------------------|-------------------------------------------------------------|------------------------|
+//! | type (struct/enum)   | `rename`, `tag`            | —                                                           | —                      |
+//! | enum variant         | (none today)               | —                                                           | `code`, `status`       |
+//! | named field          | `rename`, `optional`, `undefined` | `min`, `max`, `length(...)`, `pattern`, `email`, `url`, `custom` | —                      |
+//!
+//! `TautError` itself only reads variant-level `code` / `status`. Any other
+//! `#[taut(<key> ...)]` argument it sees on a variant — `rename = "..."` from
+//! `Type`, `length(...)` etc. (which would actually live on a field, but be
+//! defensive), or yet-unknown keys reserved for future derives — is consumed
+//! and discarded by [`consume_foreign`]. Type-level and field-level attributes
+//! are not read by this derive at all, so they don't need explicit pass-through
+//! handling. See SPEC §3.3.
 //!
 //! # Constraints
 //!
 //! - The deriving type must be an `enum`. Structs and unions are rejected.
 //! - Generics (type parameters and lifetimes) are rejected, mirroring
 //!   `derive(Type)` — Phase 1/2 require monomorphic forms.
-//! - Unknown `#[taut(...)]` keys on a variant produce a compile error rather
-//!   than being silently ignored. Supported keys are `code` and `status`.
+//! - Unknown variant-level keys are silently consumed, not rejected, so this
+//!   derive composes with sibling derives that share the `taut` namespace.
 
-use proc_macro2::TokenStream;
-use quote::{quote, quote_spanned, ToTokens};
+use proc_macro2::{Span, TokenStream};
+use quote::{quote, quote_spanned};
 use syn::spanned::Spanned;
 use syn::{
     parse2, Attribute, Data, DataEnum, DeriveInput, Fields, LitInt, LitStr, Variant as SynVariant,
 };
+
+/// Build a `syn::Error` whose message points at the relevant SPEC section so
+/// users can find the rules behind a rejection. Format:
+///
+/// ```text
+/// taut_rpc: <msg>
+///   see SPEC §<spec_anchor>
+/// ```
+fn err(span: Span, msg: &str, spec_anchor: &str) -> syn::Error {
+    syn::Error::new(span, format!("taut_rpc: {msg}\n  see SPEC §{spec_anchor}"))
+}
 
 pub(crate) fn expand(input: TokenStream) -> syn::Result<TokenStream> {
     let derive_input: DeriveInput = parse2(input)?;
@@ -49,15 +71,17 @@ pub(crate) fn expand(input: TokenStream) -> syn::Result<TokenStream> {
     let data_enum = match &derive_input.data {
         Data::Enum(e) => e,
         Data::Struct(s) => {
-            return Err(syn::Error::new(
+            return Err(err(
                 s.struct_token.span(),
-                "taut_rpc: #[derive(TautError)] can only be applied to enums",
+                "#[derive(TautError)] can only be applied to enums",
+                "3.3",
             ));
         }
         Data::Union(u) => {
-            return Err(syn::Error::new(
+            return Err(err(
                 u.union_token.span(),
-                "taut_rpc: #[derive(TautError)] can only be applied to enums",
+                "#[derive(TautError)] can only be applied to enums",
+                "3.3",
             ));
         }
     };
@@ -85,9 +109,10 @@ fn reject_generics(input: &DeriveInput) -> syn::Result<()> {
     if input.generics.params.is_empty() {
         return Ok(());
     }
-    Err(syn::Error::new(
+    Err(err(
         input.generics.span(),
-        "taut_rpc: generic types are not yet supported in v0.1; please monomorphize manually for now",
+        "generic types are not yet supported in v0.1; please monomorphize manually for now",
+        "3.3",
     ))
 }
 
@@ -156,10 +181,12 @@ impl VariantAttrs {
                     out.status = Some(parsed);
                     Ok(())
                 } else {
-                    let key = path_to_string(&meta.path);
-                    Err(meta.error(format!(
-                        "unknown taut attribute key on TautError variant: {key}; supported keys are code, status"
-                    )))
+                    // Foreign key (owned by `Type` / `Validate`, or reserved
+                    // for a future derive). Silently consume any `= <expr>`
+                    // payload or `(...)` group so this attribute can be
+                    // shared across the three derives. See the namespace
+                    // ownership table at the top of this file.
+                    consume_foreign(&meta)
                 }
             })?;
         }
@@ -167,8 +194,35 @@ impl VariantAttrs {
     }
 }
 
-fn path_to_string(path: &syn::Path) -> String {
-    path.to_token_stream().to_string().replace(' ', "")
+/// Consume the payload of a foreign `#[taut(<key> ...)]` argument so the other
+/// derives sharing this attribute can interpret it. Tolerates:
+/// - bare identifiers (`#[taut(optional)]`),
+/// - `key = <any-expr>` (`#[taut(rename = "x")]`),
+/// - `key(<group>)` (`#[taut(length(min = 1))]`).
+///
+/// Only the current key's payload is consumed — sibling keys (after a comma)
+/// remain in `meta.input` so `parse_nested_meta`'s loop can dispatch them.
+fn consume_foreign(meta: &syn::meta::ParseNestedMeta<'_>) -> syn::Result<()> {
+    let input = meta.input;
+    if input.peek(syn::Token![=]) {
+        // `key = <expr>` — parse a single Expr (comma-aware) via meta.value().
+        // The returned ParseStream advances `input` past the `=` and the
+        // value but stops at the comma boundary, leaving sibling keys intact.
+        let value = meta.value()?;
+        let _: syn::Expr = value.parse()?;
+        Ok(())
+    } else if input.peek(syn::token::Paren) {
+        // `key(...)` — parse and discard the parenthesized group; the outer
+        // input is left at the closing paren so the comma after is still
+        // available for the next sibling.
+        let content;
+        syn::parenthesized!(content in input);
+        let _: proc_macro2::TokenStream = content.parse()?;
+        Ok(())
+    } else {
+        // Bare ident with no payload — nothing to consume.
+        Ok(())
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -224,18 +278,49 @@ mod tests {
     }
 
     #[test]
-    fn variant_attrs_rejects_unknown_key() {
-        let attrs: Vec<Attribute> = vec![parse_quote!(#[taut(unknown)])];
-        let err = VariantAttrs::parse(&attrs).expect_err("must reject unknown key");
-        let msg = err.to_string();
+    fn variant_attrs_silently_consumes_foreign_keys() {
+        // Phase 5 namespace coexistence: `rename` is owned by `derive(Type)`,
+        // `length(...)` is a field-level concern of `derive(Validate)`. When
+        // the user writes them on the same variant alongside `code`/`status`,
+        // TautError must consume them without erroring so all three derives
+        // can share `#[taut(...)]`.
+        let attrs: Vec<Attribute> = vec![
+            parse_quote!(#[taut(rename = "Other", code = "x", status = 401)]),
+            parse_quote!(#[taut(unknown_future_key)]),
+            parse_quote!(#[taut(length(min = 1, max = 10))]),
+        ];
+        let parsed = VariantAttrs::parse(&attrs).expect("foreign keys must be consumed");
+        assert_eq!(parsed.code.as_deref(), Some("x"));
+        assert_eq!(parsed.status, Some(401));
+    }
+
+    #[test]
+    fn expand_handles_phase5_combined_attrs_example() {
+        // Mirrors the SPEC §5 "namespace coexistence" example: a single enum
+        // wears `#[derive(Type, Validate, TautError)]` and each variant carries
+        // owned-by-others keys (`length(...)` on a field is owned by
+        // Validate/Type; `code`/`status` on the variant are owned by us).
+        // TautError must lower without erroring on the foreign keys.
+        let input: TokenStream = quote! {
+            enum AppError {
+                #[taut(status = 401, code = "auth_required")]
+                NotAuthed,
+
+                #[taut(status = 400)]
+                BadInput { #[taut(length(min = 1))] msg: String },
+            }
+        };
+        let out = expand(input).expect("expansion must succeed").to_string();
         assert!(
-            msg.contains("unknown taut attribute key on TautError variant"),
-            "error message was: {msg}"
+            out.contains("\"auth_required\""),
+            "missing override code: {out}"
         );
+        assert!(out.contains("401"), "missing override status: {out}");
         assert!(
-            msg.contains("supported keys are code, status"),
-            "error message was: {msg}"
+            out.contains("\"bad_input\""),
+            "missing default snake_case code for BadInput: {out}"
         );
+        assert!(out.contains("400"), "missing default status: {out}");
     }
 
     #[test]

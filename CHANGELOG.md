@@ -3,8 +3,9 @@
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
-once it reaches 0.1.0. Until then, every release MAY contain breaking changes.
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+Within the 0.x series, breaking changes bump the minor version; from 1.0
+onward, the strictest semver interpretation applies.
 
 ## Wire / IR compatibility
 
@@ -18,6 +19,83 @@ once it reaches 0.1.0. Until then, every release MAY contain breaking changes.
 Each entry below MUST note an IR or wire bump if one happened.
 
 ---
+
+## [Unreleased]
+
+### Added
+<!-- placeholder for post-0.1.0 changes -->
+
+### Changed
+<!-- placeholder -->
+
+### Deprecated
+<!-- placeholder -->
+
+### Removed
+<!-- placeholder -->
+
+### Fixed
+<!-- placeholder -->
+
+### IR
+<!-- placeholder; add a row to SPEC §9.1 if IR_VERSION bumps -->
+
+### Wire
+<!-- placeholder -->
+
+---
+
+## [0.1.0] - 2026-05-07
+
+The first stable release. Phases 0–5 of the [roadmap](./ROADMAP.md) have all
+landed; the API is stable enough that we now follow strict semver for
+breaking changes (within the 0.x lifetime, breaking changes still bump the
+minor — wait for 1.0 for the strictest interpretation).
+
+### Highlights
+
+- End-to-end type-safe RPC between Rust (axum) and TypeScript clients.
+- Single source of truth: Rust types own the contract; codegen produces a
+  static `api.gen.ts` with no runtime schema fetch.
+- Server-side: `#[rpc]` and `#[rpc(stream)]` macros, `Router::layer(...)` for
+  middleware, `Router::procedure(...)` for typed registration.
+- Validation bridge: `#[derive(Validate)]` macro, server-side enforcement,
+  Valibot/Zod schema codegen, client-side pre-send + post-receive validation.
+- Subscriptions: SSE by default, WebSocket behind the `ws` feature, mapped to
+  `AsyncIterable<T>` on the TypeScript side.
+- CLI: `cargo taut gen` (codegen), `cargo taut check` (drift), `cargo taut
+  inspect` (human-readable IR), `cargo taut mcp` (Model Context Protocol
+  manifest).
+- Documentation: a complete mdBook with concepts, guides, tutorials, and
+  reference at <https://nktkt.github.io/taut-rpc>.
+- Examples: smoke (Phase 0), phase1–phase4-validate (covering each phase's
+  features), todo-react (Vite + React full-stack), counter-sveltekit
+  (SvelteKit full-stack).
+
+### Versioning policy
+
+- Crate version: `0.1.0` for `taut-rpc`, `taut-rpc-macros`, `taut-rpc-cli`.
+- npm package: `0.1.0` for `taut-rpc`.
+- IR_VERSION: `1`. (Phase 4 bumped from 0 to 1.)
+- Wire format: subscription frames are v0; queries/mutations have no version
+  header (the envelope is intentionally simple).
+
+### Breaking changes from 0.0.0
+
+- `IR_VERSION` bumped from 0 to 1 — old `target/taut/ir.json` files will be
+  rejected by `cargo taut gen`. Re-run `cargo run` (with the binary's
+  `dump_if_requested` step) to regenerate.
+- `ProcedureDescriptor.handler` field renamed to `body` and re-typed to
+  `ProcedureBody { Unary | Stream }`.
+
+---
+
+## Pre-0.1.0 development log
+
+The sections below were written incrementally during phases 1–4 and the
+agent-tools side-track. They are kept for historical reference but are not
+edited going forward; consolidated highlights for the 0.1.0 release are
+above.
 
 ## [Unreleased] — Phase 4
 

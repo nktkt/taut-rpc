@@ -1,0 +1,30 @@
+{
+  "name": "todo-react-client",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "build-api": "cd ../../.. && cargo run -p taut-rpc-cli -- taut gen --from-binary examples/todo-react/server/target/debug/todo-react-server --out examples/todo-react/client/src/api.gen.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0",
+    "taut-rpc": "file:../../../npm/taut-rpc",
+    "valibot": "^0.42.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "typescript": "^5.6.0",
+    "vite": "^5.4.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

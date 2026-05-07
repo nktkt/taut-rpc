@@ -1,11 +1,23 @@
 # cargo-deny configuration. Run with `cargo deny check`.
 # See https://embarkstudios.github.io/cargo-deny/
 #
-# Reviewed/refreshed at v0.0.0 (Day-0 OSS). Sweep this file again before 0.1
-# to tighten policies (e.g. flip multiple-versions to "deny", trim license
-# allow-list, audit any accumulated `skip` / `ignore` entries).
+# Refreshed for v0.1.0. Policy stance for the first published release:
+#   * licenses: permissive + weak-copyleft only (MIT/Apache-2.0/BSD/ISC/MPL-2.0
+#     family). Some entries on the allow-list are forward-looking — they cover
+#     common Rust ecosystem licenses we'd hit as the dep graph grows, even if
+#     no current dep uses them. cargo-deny emits "license-not-encountered"
+#     warnings for those; that's expected and intentional.
+#   * bans: `multiple-versions = "warn"` (don't deny — transitive deps
+#     routinely pull duplicates we can't control). `wildcards = "deny"` with
+#     `allow-wildcard-paths = true` so internal workspace `path = ".."`
+#     dev-deps don't trip the wildcard rule (they never ship).
+#   * advisories: warn-only on yanked; RustSec DB drives the rest.
 #
-# tested with cargo-deny 0.16
+# Sweep again at the next minor release to tighten further (e.g. flip
+# multiple-versions to "deny" once we've audited duplicates, audit any
+# accumulated `skip` / `ignore` entries).
+#
+# tested with cargo-deny 0.19
 
 [graph]
 all-features = false
@@ -55,6 +67,10 @@ exceptions = []
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Internal workspace crates depend on each other via `path = ".."` (no
+# version), which cargo-deny otherwise flags as a wildcard. These are
+# dev-deps used only for tests/benches and never escape the workspace.
+allow-wildcard-paths = true
 highlight = "all"
 allow = []
 deny = []

@@ -63,6 +63,7 @@ struct CreateInput {
 /// docstring: there's no zero-cost stand-in for `Infallible` we can plug in
 /// without touching crate sources, and the success path is unaffected.
 #[taut_rpc::rpc(mutation)]
+#[allow(clippy::unused_async)] // `#[rpc]` requires `async fn` signatures
 async fn create(input: CreateInput) -> u64 {
     // The handler body is irrelevant for tests 1-3 (validation rejects the
     // input before we get here); for test 5 we return 1 so the body matches
@@ -89,8 +90,9 @@ struct TicksInput {
 }
 
 /// Subscription procedure used by test 4. Yields nothing useful — the test
-/// only inspects the validation_error frame, so the stream body never runs.
+/// only inspects the `validation_error` frame, so the stream body never runs.
 #[taut_rpc::rpc(stream)]
+#[allow(clippy::unused_async)] // `#[rpc(stream)]` requires `async fn` signatures
 async fn ticks(input: TicksInput) -> impl futures::Stream<Item = u32> + Send + 'static {
     async_stream::stream! {
         for i in 0..input.count {

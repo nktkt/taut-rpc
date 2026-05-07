@@ -1,7 +1,7 @@
 //! TypeScript codegen for `cargo taut gen` (Phase 1 + 2 error narrowing,
 //! Phase 4 validator schemas).
 //!
-//! Pure logic: takes an [`ir::Ir`] document and renders a single
+//! Pure logic: takes an [`taut_rpc::ir::Ir`] document and renders a single
 //! `api.gen.ts` source string. The CLI's `gen` subcommand owns the I/O and
 //! validator-flag parsing; this module owns the string-building.
 //!
@@ -28,7 +28,7 @@
 //! - For each procedure we emit `Proc_<name>_inputSchema` and
 //!   `Proc_<name>_outputSchema` constants — either an alias to an existing
 //!   `<Name>Schema` (for `Named` types) or an inline expression (for
-//!   primitives / composites that don't have a TypeDef of their own).
+//!   primitives / composites that don't have a `TypeDef` of their own).
 //! - We emit a `procedureSchemas` runtime map mirroring `procedureKinds` so
 //!   `createClient` can locate a procedure's schemas by name.
 
@@ -143,7 +143,7 @@ fn write_types(out: &mut String, ir: &Ir, tm_opts: &type_map::Options) -> Result
     let mut order: Vec<&TypeDef> = Vec::new();
     for t in &ir.types {
         match seen.get(t.name.as_str()) {
-            Some(prev) if *prev == t => continue,
+            Some(prev) if *prev == t => {}
             Some(_) => {
                 return Err(format!(
                     "duplicate TypeDef `{}` with conflicting bodies",
@@ -266,7 +266,7 @@ fn write_variant(
                 );
                 return;
             }
-            let _ = writeln!(out, "  | {{ {tag}: {variant},", variant = quoted(&v.name),);
+            let _ = writeln!(out, "  | {{ {tag}: {variant},", variant = quoted(&v.name));
             for (i, f) in fields.iter().enumerate() {
                 let last = i + 1 == fields.len();
                 let ty = type_map::render_type(&f.ty, tm_opts);
@@ -386,7 +386,7 @@ fn write_procedure_kinds(out: &mut String, ir: &Ir) {
             taut_rpc::ir::ProcKind::Mutation => "\"mutation\"",
             taut_rpc::ir::ProcKind::Subscription => "\"subscription\"",
         };
-        let _ = writeln!(out, "  {key}: {kind_lit},", key = quoted(&p.name),);
+        let _ = writeln!(out, "  {key}: {kind_lit},", key = quoted(&p.name));
     }
     out.push_str(
         "} as const satisfies Record<keyof Procedures, \"query\" | \"mutation\" | \"subscription\">;\n\n",
@@ -406,7 +406,7 @@ fn write_create_api(out: &mut String) {
 // Phase 4: validator schema emission
 // ---------------------------------------------------------------------------
 
-/// Emit `<Name>Schema` consts for every TypeDef. Skipped entirely when the
+/// Emit `<Name>Schema` consts for every `TypeDef`. Skipped entirely when the
 /// validator is `None`.
 fn write_schemas(out: &mut String, ir: &Ir, validator: Validator, tm_opts: &type_map::Options) {
     if matches!(validator, Validator::None) || ir.types.is_empty() {
@@ -482,8 +482,7 @@ fn render_enum_schema(e: &EnumDef, validator: Validator, tm_opts: &type_map::Opt
         // Uninhabited: emit a never-shaped schema. Both libraries accept
         // a zero-element union via their respective primitives.
         return match validator {
-            Validator::Valibot => format!("{prefix}.never()"),
-            Validator::Zod => format!("{prefix}.never()"),
+            Validator::Valibot | Validator::Zod => format!("{prefix}.never()"),
             Validator::None => unreachable!(),
         };
     }
@@ -514,8 +513,7 @@ fn render_variant_schema(
 ) -> String {
     let prefix = ns(validator);
     let tag_field = match validator {
-        Validator::Valibot => format!("{prefix}.literal({})", quoted(&v.name)),
-        Validator::Zod => format!("{prefix}.literal({})", quoted(&v.name)),
+        Validator::Valibot | Validator::Zod => format!("{prefix}.literal({})", quoted(&v.name)),
         Validator::None => unreachable!(),
     };
     match &v.payload {
@@ -551,7 +549,7 @@ fn render_variant_schema(
     }
 }
 
-/// Render a tuple-shaped TypeDef's schema: `v.tuple([...])` / `z.tuple([...])`.
+/// Render a tuple-shaped `TypeDef`'s schema: `v.tuple([...])` / `z.tuple([...])`.
 fn render_tuple_schema(
     elems: &[TypeRef],
     validator: Validator,
@@ -600,10 +598,7 @@ fn render_schema(t: &TypeRef, validator: Validator, tm_opts: &type_map::Options)
             // back to `array(tuple([k, v]))`.
             if is_string_keyed(key) {
                 match validator {
-                    Validator::Valibot => {
-                        format!("{prefix}.record({prefix}.string(), {v_expr})")
-                    }
-                    Validator::Zod => {
+                    Validator::Valibot | Validator::Zod => {
                         format!("{prefix}.record({prefix}.string(), {v_expr})")
                     }
                     Validator::None => unreachable!(),
@@ -774,13 +769,30 @@ fn apply_zod_constraints(base: &str, inner_ty: &TypeRef, constraints: &[Constrai
     }
 }
 
+#[allow(clippy::match_same_arms)] // arms kept distinct so per-variant SPEC comments stay attached
 fn render_primitive_schema(
     p: Primitive,
     validator: Validator,
     tm_opts: &type_map::Options,
 ) -> String {
+    use Primitive::{
+        Bool, Bytes, DateTime, String, Unit, Uuid, F32, F64, I128, I16, I32, I64, I8, U128, U16,
+        U32, U64, U8,
+    };
     let prefix = ns(validator);
-    use Primitive::*;
+    // Native-bigint primitives (u64/i64/u128/i128) need JSON-compat coercion:
+    // the wire value comes back from `JSON.parse` as a `number` (or `string`
+    // when the runtime opted into stringly-typed bigints), but the generated
+    // TS type is `bigint`. Plain `v.bigint()` / `z.bigint()` would reject the
+    // parsed value at output validation time. Emit a small union+transform so
+    // the post-parse value is always a `bigint` that matches the TS type.
+    if matches!(p, U64 | I64 | U128 | I128) && tm_opts.bigint == BigIntStrategy::Native {
+        return match validator {
+            Validator::Valibot => "v.pipe(v.union([v.bigint(), v.number(), v.string()]), v.transform((x): bigint => typeof x === \"bigint\" ? x : BigInt(x as number | string)), v.bigint())".to_string(),
+            Validator::Zod => "z.union([z.bigint(), z.number(), z.string()]).transform(x => typeof x === \"bigint\" ? x : BigInt(x as any)).pipe(z.bigint())".to_string(),
+            Validator::None => unreachable!(),
+        };
+    }
     let suffix = match p {
         Bool => "boolean()",
         U8 | U16 | U32 | I8 | I16 | I32 | F32 | F64 => "number()",
@@ -815,8 +827,8 @@ fn is_string_typed(t: &TypeRef) -> bool {
     )
 }
 
-/// A "string-keyed" map (mirrors `type_map`'s rule). String, DateTime, and
-/// Uuid all serialise as strings.
+/// A "string-keyed" map (mirrors `type_map`'s rule). `String`, `DateTime`, and
+/// `Uuid` all serialise as strings.
 fn is_string_keyed(key: &TypeRef) -> bool {
     matches!(
         key,
@@ -827,6 +839,10 @@ fn is_string_keyed(key: &TypeRef) -> bool {
 /// Render an `f64` constraint bound back into TS source. Whole numbers come
 /// out without a decimal point so that `Min(0.0)` reads as `0`, not `0.0`.
 fn render_number(n: f64) -> String {
+    // The `n.abs() < 1e16` guard keeps the value inside i64's safe integer
+    // range, so the cast can't truncate; the explicit `#[allow]` documents
+    // that the lossy-cast lint is intentional here.
+    #[allow(clippy::cast_possible_truncation)]
     if n.is_finite() && n.fract() == 0.0 && n.abs() < 1e16 {
         format!("{}", n as i64)
     } else {
@@ -891,7 +907,10 @@ fn write_procedure_schemas(
         out,
         "function __taut_wrap(schema: {schema_ty}): {{ parse(value: unknown): unknown }} {{",
     );
-    let _ = writeln!(out, "  return {{ parse: (value: unknown) => {parse_call} }};");
+    let _ = writeln!(
+        out,
+        "  return {{ parse: (value: unknown) => {parse_call} }};"
+    );
     out.push_str("}\n\n");
 
     for p in &ir.procedures {
@@ -917,7 +936,7 @@ fn write_procedure_schemas(
 }
 
 /// Pick the right schema expression for a procedure's input or output type:
-/// alias an existing TypeDef schema by name when possible, otherwise fall
+/// alias an existing `TypeDef` schema by name when possible, otherwise fall
 /// back to an inline schema expression.
 fn procedure_io_schema(
     t: &TypeRef,
@@ -1576,7 +1595,14 @@ mod tests {
             s.contains("export interface User {"),
             "interface should still be emitted:\n{s}"
         );
-        assert!(s.contains("id: v.bigint()"), "id field schema wrong:\n{s}");
+        // u64 emits a coercion-style schema so a JSON-parsed number/string
+        // round-trips into a bigint at output-validation time.
+        assert!(
+            s.contains(
+                "id: v.pipe(v.union([v.bigint(), v.number(), v.string()]), v.transform((x): bigint => typeof x === \"bigint\" ? x : BigInt(x as number | string)), v.bigint())"
+            ),
+            "id field schema wrong (expected bigint coercion pipe):\n{s}"
+        );
         assert!(
             s.contains("name: v.string()"),
             "name field schema wrong:\n{s}"
@@ -1787,6 +1813,28 @@ mod tests {
         assert!(
             s.contains("email: z.string().email()"),
             "zod email chain wrong:\n{s}"
+        );
+    }
+
+    #[test]
+    fn zod_emits_bigint_coercion_for_u64() {
+        let ir = one_struct_ir(
+            "User",
+            vec![plain_field(
+                "id",
+                TypeRef::Primitive(Primitive::U64),
+                vec![],
+            )],
+        );
+        let s = render_ts(&ir, &opts_zod());
+        // Same coercion idea as Valibot: union of bigint/number/string,
+        // transform into bigint, then pipe through z.bigint() so the final
+        // post-parse type matches the emitted `bigint` TS type.
+        assert!(
+            s.contains(
+                "id: z.union([z.bigint(), z.number(), z.string()]).transform(x => typeof x === \"bigint\" ? x : BigInt(x as any)).pipe(z.bigint())"
+            ),
+            "zod bigint coercion missing:\n{s}"
         );
     }
 

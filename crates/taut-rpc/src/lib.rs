@@ -24,6 +24,12 @@
 //! See [`SPEC.md`](https://github.com/anthropics/taut-rpc/blob/main/SPEC.md) for
 //! the full design — wire format, type mapping, IR schema, and versioning rules.
 //! The [`IR_VERSION`] constant tracks SPEC §9.
+//!
+//! For ergonomic imports use `use taut_rpc::prelude::*;` — see [`prelude`].
+
+#![warn(missing_docs)]
+
+pub mod prelude;
 
 pub mod dump;
 pub mod error;
@@ -47,4 +53,5 @@ pub use validate::{Constraint, Validate, ValidationError};
 
 pub use taut_rpc_macros::{rpc, TautError, Type, Validate};
 
+/// Current IR schema version. Tracks SPEC §9 — codegen rejects mismatches.
 pub const IR_VERSION: u32 = 1;

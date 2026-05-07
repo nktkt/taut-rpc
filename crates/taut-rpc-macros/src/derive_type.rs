@@ -34,16 +34,48 @@
 //! reported as compile errors via [`syn::Error`]; the macro never panics on
 //! user input.
 //!
+//! # `#[taut(...)]` namespace ownership (Phase 5 audit)
+//!
+//! The `#[taut(...)]` attribute is shared with `#[derive(Validate)]` and
+//! `#[derive(TautError)]`. Each derive owns a disjoint set of keys and silently
+//! consumes any key it doesn't own (without erroring) so a single
+//! `#[taut(...)]` block can drive all three derives at once. Ownership map:
+//!
+//! | Position             | Owned by `Type`            | Owned by `Validate`                                         | Owned by `TautError`   |
+//! |----------------------|----------------------------|-------------------------------------------------------------|------------------------|
+//! | type (struct/enum)   | `rename`, `tag`            | —                                                           | —                      |
+//! | enum variant         | `rename` (forward-compat)  | —                                                           | `code`, `status`       |
+//! | named field          | `rename`, `optional`, `undefined`, plus the validation keys below (recorded into the IR) | `min`, `max`, `length(...)`, `pattern`, `email`, `url`, `custom` | —                      |
+//!
+//! `Type` is the busiest of the three: it owns layout/IR-name keys *and*
+//! records every validation constraint into the emitted `Field.constraints`
+//! vec so codegen can lower the schema. The `code` / `status` keys (owned by
+//! `TautError`) are explicitly consumed at both the type-level and
+//! field-level `parse_nested_meta` callbacks, plus at the variant level so a
+//! variant carrying `#[taut(status = 401, code = "x")]` doesn't make this
+//! derive error.
+//!
 //! [`TypeRef::Named`]: ::taut_rpc::ir::TypeRef::Named
 //! [`TypeDef`]: ::taut_rpc::ir::TypeDef
 
-use proc_macro2::TokenStream;
+use proc_macro2::{Span, TokenStream};
 use quote::{quote, quote_spanned, ToTokens};
 use syn::spanned::Spanned;
 use syn::{
     parse2, Attribute, Data, DataEnum, DataStruct, DeriveInput, Expr, ExprLit, Field as SynField,
     Fields, Lit, LitStr, Meta, Token, Variant as SynVariant,
 };
+
+/// Build a `syn::Error` whose message points at the relevant SPEC section so
+/// users can find the rules behind a rejection. Format:
+///
+/// ```text
+/// taut_rpc: <msg>
+///   see SPEC §<spec_anchor>
+/// ```
+fn err(span: Span, msg: &str, spec_anchor: &str) -> syn::Error {
+    syn::Error::new(span, format!("taut_rpc: {msg}\n  see SPEC §{spec_anchor}"))
+}
 
 pub(crate) fn expand(input: TokenStream) -> syn::Result<TokenStream> {
     let derive_input: DeriveInput = parse2(input)?;
@@ -58,10 +90,7 @@ pub(crate) fn expand(input: TokenStream) -> syn::Result<TokenStream> {
         Data::Struct(s) => expand_struct(s)?,
         Data::Enum(e) => expand_enum(e, type_attrs.tag.as_deref())?,
         Data::Union(u) => {
-            return Err(syn::Error::new(
-                u.union_token.span(),
-                "taut_rpc: unions are not supported",
-            ));
+            return Err(err(u.union_token.span(), "unions are not supported", "3.2"));
         }
     };
 
@@ -98,9 +127,10 @@ fn reject_generics(input: &DeriveInput) -> syn::Result<()> {
     // Both type parameters and lifetime parameters are rejected for v0.1; the
     // SPEC says generics must be monomorphized manually, and lifetimes have no
     // representation in the IR / TS output anyway.
-    Err(syn::Error::new(
+    Err(err(
         input.generics.span(),
-        "taut_rpc: generic types are not yet supported in v0.1; please monomorphize manually for now",
+        "generic types are not yet supported in v0.1; please monomorphize manually for now",
+        "3.2",
     ))
 }
 
@@ -354,7 +384,7 @@ impl TypeAttrs {
                 } else {
                     let key = path_to_string(&meta.path);
                     Err(meta.error(format!(
-                        "unknown taut attribute key: {key}; supported keys are rename, tag, optional, undefined, code, status"
+                        "taut_rpc: unknown taut attribute key: {key}; supported keys are rename, tag, optional, undefined, code, status\n  see SPEC §3.2"
                     )))
                 }
             })?;
@@ -442,7 +472,7 @@ impl FieldAttrs {
                 } else {
                     let key = path_to_string(&meta.path);
                     Err(meta.error(format!(
-                        "unknown taut attribute key: {key}; supported keys are rename, optional, undefined, min, max, length, pattern, email, url, custom, code, status"
+                        "taut_rpc: unknown taut attribute key: {key}; supported keys are rename, optional, undefined, min, max, length, pattern, email, url, custom, code, status\n  see SPEC §3.2"
                     )))
                 }
             })?;
@@ -462,9 +492,10 @@ fn lit_to_f64(lit: &Lit) -> syn::Result<f64> {
     match lit {
         Lit::Int(i) => i.base10_parse::<f64>(),
         Lit::Float(f) => f.base10_parse::<f64>(),
-        other => Err(syn::Error::new(
+        other => Err(err(
             other.span(),
-            "taut_rpc: expected numeric literal (integer or float) for min/max",
+            "expected numeric literal (integer or float) for min/max",
+            "7",
         )),
     }
 }
@@ -472,9 +503,10 @@ fn lit_to_f64(lit: &Lit) -> syn::Result<f64> {
 fn lit_to_u32(lit: &Lit) -> syn::Result<u32> {
     match lit {
         Lit::Int(i) => i.base10_parse::<u32>(),
-        other => Err(syn::Error::new(
+        other => Err(err(
             other.span(),
-            "taut_rpc: expected u32 integer literal for length bounds",
+            "expected u32 integer literal for length bounds",
+            "7",
         )),
     }
 }
@@ -497,14 +529,15 @@ fn parse_length_meta(meta: &syn::meta::ParseNestedMeta) -> syn::Result<(Option<u
         } else {
             let key = path_to_string(&inner.path);
             Err(inner.error(format!(
-                "taut_rpc: unknown key in length(...): {key}; expected min or max"
+                "taut_rpc: unknown key in length(...): {key}; expected min or max\n  see SPEC §7"
             )))
         }
     })?;
     if min.is_none() && max.is_none() {
-        return Err(syn::Error::new(
+        return Err(err(
             span,
-            "taut_rpc: length(...) requires at least one of min or max",
+            "length(...) requires at least one of min or max",
+            "7",
         ));
     }
     Ok((min, max))
@@ -616,7 +649,7 @@ impl VariantAttrs {
                 } else {
                     let key = path_to_string(&meta.path);
                     Err(meta.error(format!(
-                        "unknown taut attribute key: {key}; supported keys are rename, tag, optional, undefined, code, status"
+                        "taut_rpc: unknown taut attribute key: {key}; supported keys are rename, tag, optional, undefined, code, status\n  see SPEC §3.2"
                     )))
                 }
             })?;
@@ -748,6 +781,7 @@ mod tests {
     // -- Constraint attribute parsing -----------------------------------------
 
     #[test]
+    #[allow(clippy::float_cmp)] // exact-literal round-trip
     fn field_attrs_parses_min_and_max_as_f64() {
         // Integer literals coerce to f64; float literals also accepted.
         let attrs: Vec<Attribute> = vec![parse_quote!(#[taut(min = 0, max = 100)])];
@@ -987,6 +1021,35 @@ mod tests {
         assert!(
             normalized.contains("Constraint::Email"),
             "expected Constraint::Email literal on struct-variant field, got: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_handles_phase5_combined_attrs_example() {
+        // SPEC §5 namespace coexistence: an enum decorated with
+        // `#[derive(Type, Validate, TautError)]` carries variant-level
+        // `code`/`status` (owned by TautError) and field-level `length(...)`
+        // (owned by both us and Validate — we record it into the IR while
+        // Validate emits the runtime check). This derive must consume the
+        // foreign `code`/`status` keys without erroring AND record the
+        // length constraint into the emitted Field.
+        let out = emit(quote! {
+            enum AppError {
+                #[taut(status = 401, code = "auth_required")]
+                NotAuthed,
+
+                #[taut(status = 400)]
+                BadInput { #[taut(length(min = 1))] msg: String },
+            }
+        });
+        let normalized: String = out.split_whitespace().collect();
+        assert!(
+            normalized.contains("Constraint::Length"),
+            "field-level length must record a Constraint into the IR: {out}"
+        );
+        assert!(
+            normalized.contains("Some(1u32)"),
+            "length min bound missing in IR: {out}"
         );
     }
 

@@ -36,6 +36,25 @@ use serde::{Deserialize, Serialize};
 /// `#[derive(Validate)]` (Phase 4) implements this by walking the type's
 /// fields and dispatching to the [`check`] helpers in this module via
 /// [`run`] + [`collect`] + [`nested`]. Hand-written impls are also supported.
+///
+/// # Examples
+///
+/// Most users derive `Validate` and annotate fields with the constraint
+/// vocabulary from SPEC §7:
+///
+/// ```rust,ignore
+/// use taut_rpc::Validate;
+///
+/// #[derive(Validate)]
+/// pub struct CreateUser {
+///     #[validate(length(min = 1, max = 64))]
+///     pub name: String,
+///     #[validate(email)]
+///     pub email: String,
+///     #[validate(min = 0.0, max = 150.0)]
+///     pub age: u32,
+/// }
+/// ```
 pub trait Validate {
     /// Validate `self`, returning every collected failure.
     ///
@@ -88,7 +107,12 @@ pub enum Constraint {
     /// Numeric upper bound (inclusive).
     Max(f64),
     /// String length range: `length(min, max?)`.
-    Length { min: Option<u32>, max: Option<u32> },
+    Length {
+        /// Inclusive minimum length, if any.
+        min: Option<u32>,
+        /// Inclusive maximum length, if any.
+        max: Option<u32>,
+    },
     /// Regex pattern (uncompiled — codegen forwards to JS `RegExp` /
     /// Valibot `regex`).
     Pattern(String),
@@ -461,7 +485,7 @@ impl<T: Validate> Validate for Vec<T> {
         let mut errors = Vec::new();
         for (i, v) in self.iter().enumerate() {
             if let Err(mut errs) = v.validate() {
-                for e in errs.iter_mut() {
+                for e in &mut errs {
                     e.path = if e.path.is_empty() {
                         format!("[{i}]")
                     } else {
@@ -485,7 +509,7 @@ impl<T: Validate> Validate for Box<T> {
     }
 }
 
-impl<K, V: Validate> Validate for std::collections::HashMap<K, V> {
+impl<K, V: Validate, S: std::hash::BuildHasher> Validate for std::collections::HashMap<K, V, S> {
     fn validate(&self) -> Result<(), Vec<ValidationError>> {
         let mut errors = Vec::new();
         for v in self.values() {
@@ -1203,6 +1227,15 @@ mod tests {
             }
         }
 
+        // Inner type whose error has an empty path — used below to verify
+        // that index-only paths don't grow a trailing dot.
+        struct RootFail;
+        impl Validate for RootFail {
+            fn validate(&self) -> Result<(), Vec<ValidationError>> {
+                Err(vec![ValidationError::new("", "custom", "boom")])
+            }
+        }
+
         let v = vec![Field(5), Field(-1), Field(10), Field(-2)];
         let errs = v.validate().expect_err("indices 1 and 3 should fail");
         assert_eq!(errs.len(), 2);
@@ -1220,12 +1253,6 @@ mod tests {
         ok.validate().expect("all-valid Vec passes");
 
         // Inner with empty path: index alone, no trailing dot.
-        struct RootFail;
-        impl Validate for RootFail {
-            fn validate(&self) -> Result<(), Vec<ValidationError>> {
-                Err(vec![ValidationError::new("", "custom", "boom")])
-            }
-        }
         let v = vec![RootFail, RootFail];
         let errs = v.validate().expect_err("both fail at root");
         assert_eq!(errs.len(), 2);

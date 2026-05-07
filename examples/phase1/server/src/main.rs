@@ -29,7 +29,7 @@ pub struct AddInput {
     pub b: i32,
 }
 
-#[derive(Serialize, Deserialize, Type, thiserror::Error, Debug)]
+#[derive(Serialize, Deserialize, Type, taut_rpc::TautError, thiserror::Error, Debug)]
 #[serde(tag = "code", content = "payload", rename_all = "snake_case")]
 pub enum AddError {
     /// `a + b` overflowed `i32`.
@@ -56,7 +56,7 @@ pub struct User {
     pub name: String,
 }
 
-#[derive(Serialize, Deserialize, Type, thiserror::Error, Debug)]
+#[derive(Serialize, Deserialize, Type, taut_rpc::TautError, thiserror::Error, Debug)]
 #[serde(tag = "code", content = "payload", rename_all = "snake_case")]
 pub enum GetUserError {
     /// No user exists with this id.

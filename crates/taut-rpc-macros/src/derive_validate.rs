@@ -27,6 +27,20 @@
 //! are likewise tolerated; only malformed *validation* constraint args
 //! (e.g. `#[taut(min = "abc")]`) raise a compile error.
 //!
+//! # `#[taut(...)]` namespace ownership (Phase 5 audit)
+//!
+//! | Position             | Owned by `Type`            | Owned by `Validate`                                         | Owned by `TautError`   |
+//! |----------------------|----------------------------|-------------------------------------------------------------|------------------------|
+//! | type (struct/enum)   | `rename`, `tag`            | —                                                           | —                      |
+//! | enum variant         | `rename` (forward-compat)  | —                                                           | `code`, `status`       |
+//! | named field          | `rename`, `optional`, `undefined`, plus the validation keys below (recorded into the IR for codegen) | `min`, `max`, `length(...)`, `pattern`, `email`, `url`, `custom` | —                      |
+//!
+//! This derive only inspects field-level attributes. Type-level and
+//! variant-level `#[taut(...)]` attributes are not parsed at all here, so
+//! anything users put there flows through untouched (no need for explicit
+//! pass-through handling at those positions). Field-level pass-through is
+//! implemented by [`consume_foreign`].
+//!
 //! # Type / enum shape
 //!
 //! - Structs with named fields walk each field, parse its constraints, and
@@ -40,13 +54,24 @@
 //! Generics, lifetimes, and unions are rejected with a clear `syn::Error`.
 //! The macro never panics on user input.
 
-use proc_macro2::TokenStream;
+use proc_macro2::{Span, TokenStream};
 use quote::{quote, quote_spanned};
 use syn::spanned::Spanned;
 use syn::{
     parse2, Attribute, Data, DataEnum, DataStruct, DeriveInput, Expr, ExprLit, ExprUnary,
     Field as SynField, Fields, Lit, LitStr, UnOp, Variant as SynVariant,
 };
+
+/// Build a `syn::Error` whose message points at the relevant SPEC section so
+/// users can find the rules behind a rejection. Format:
+///
+/// ```text
+/// taut_rpc: <msg>
+///   see SPEC §<spec_anchor>
+/// ```
+fn err(span: Span, msg: &str, spec_anchor: &str) -> syn::Error {
+    syn::Error::new(span, format!("taut_rpc: {msg}\n  see SPEC §{spec_anchor}"))
+}
 
 pub(crate) fn expand(input: TokenStream) -> syn::Result<TokenStream> {
     let derive_input: DeriveInput = parse2(input)?;
@@ -58,9 +83,10 @@ pub(crate) fn expand(input: TokenStream) -> syn::Result<TokenStream> {
         Data::Struct(s) => expand_struct(s)?,
         Data::Enum(e) => expand_enum(e)?,
         Data::Union(u) => {
-            return Err(syn::Error::new(
+            return Err(err(
                 u.union_token.span(),
-                "taut_rpc: unions are not supported by #[derive(Validate)]",
+                "unions are not supported by #[derive(Validate)]",
+                "7",
             ));
         }
     };
@@ -83,9 +109,10 @@ fn reject_generics(input: &DeriveInput) -> syn::Result<()> {
     if input.generics.params.is_empty() {
         return Ok(());
     }
-    Err(syn::Error::new(
+    Err(err(
         input.generics.span(),
-        "taut_rpc: generic types are not yet supported in v0.1; please monomorphize manually for now",
+        "generic types are not yet supported in v0.1; please monomorphize manually for now",
+        "7",
     ))
 }
 
@@ -445,14 +472,14 @@ fn parse_length(meta: &syn::meta::ParseNestedMeta<'_>) -> syn::Result<LengthBoun
             Ok(())
         } else {
             Err(inner.error(
-                "taut_rpc: unknown key inside #[taut(length(...))]; expected `min` or `max`",
+                "taut_rpc: unknown key inside #[taut(length(...))]; expected `min` or `max`\n  see SPEC §7",
             ))
         }
     })?;
     if !saw_any {
-        return Err(
-            meta.error("taut_rpc: #[taut(length(...))] requires at least one of `min` or `max`")
-        );
+        return Err(meta.error(
+            "taut_rpc: #[taut(length(...))] requires at least one of `min` or `max`\n  see SPEC §7",
+        ));
     }
     Ok(bounds)
 }
@@ -468,9 +495,10 @@ fn parse_number_expr(expr: &Expr) -> syn::Result<f64> {
             expr,
             ..
         }) => Ok(-parse_number_expr(expr)?),
-        other => Err(syn::Error::new(
+        other => Err(err(
             other.span(),
-            "taut_rpc: expected a numeric literal (integer or float) for `min` / `max`",
+            "expected a numeric literal (integer or float) for `min` / `max`",
+            "7",
         )),
     }
 }
@@ -479,9 +507,10 @@ fn parse_number_lit(lit: &Lit) -> syn::Result<f64> {
     match lit {
         Lit::Int(i) => i.base10_parse::<f64>(),
         Lit::Float(f) => f.base10_parse::<f64>(),
-        other => Err(syn::Error::new(
+        other => Err(err(
             other.span(),
-            "taut_rpc: expected a numeric literal (integer or float) for `min` / `max`",
+            "expected a numeric literal (integer or float) for `min` / `max`",
+            "7",
         )),
     }
 }
@@ -491,12 +520,12 @@ fn parse_number_lit(lit: &Lit) -> syn::Result<f64> {
 fn reject_value(meta: &syn::meta::ParseNestedMeta<'_>, key: &str) -> syn::Result<()> {
     if meta.input.peek(syn::Token![=]) {
         return Err(meta.error(format!(
-            "taut_rpc: `#[taut({key})]` is a bare flag and does not take a value"
+            "taut_rpc: `#[taut({key})]` is a bare flag and does not take a value\n  see SPEC §7"
         )));
     }
     if meta.input.peek(syn::token::Paren) {
         return Err(meta.error(format!(
-            "taut_rpc: `#[taut({key})]` is a bare flag and does not take a group"
+            "taut_rpc: `#[taut({key})]` is a bare flag and does not take a group\n  see SPEC §7"
         )));
     }
     Ok(())
@@ -856,5 +885,37 @@ mod tests {
         assert!(c.pattern.is_none());
         assert!(!c.email);
         assert!(!c.url);
+    }
+
+    #[test]
+    fn expand_handles_phase5_combined_attrs_example() {
+        // SPEC §5 namespace coexistence: an enum decorated with all three
+        // derives carries variant-level `code`/`status` (owned by TautError)
+        // alongside field-level `length(...)` (owned here). Variant-level
+        // attrs aren't read by this derive at all (they fall through to the
+        // generated match arm with `..`), and the field-level `length(...)`
+        // must still emit a `check::length` call.
+        let input: TokenStream = quote! {
+            enum AppError {
+                #[taut(status = 401, code = "auth_required")]
+                NotAuthed,
+
+                #[taut(status = 400)]
+                BadInput { #[taut(length(min = 1))] msg: String },
+            }
+        };
+        let out = expand(input).expect("expansion must succeed").to_string();
+        assert!(
+            out.contains(":: check :: length"),
+            "field-level length must still emit a check call: {out}"
+        );
+        assert!(
+            out.contains("Self :: NotAuthed =>"),
+            "unit variant pattern missing: {out}"
+        );
+        assert!(
+            out.contains("Self :: BadInput {"),
+            "struct variant pattern missing: {out}"
+        );
     }
 }

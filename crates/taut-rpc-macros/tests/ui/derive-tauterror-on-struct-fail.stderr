@@ -1,0 +1,6 @@
+error: taut_rpc: #[derive(TautError)] can only be applied to enums
+         see SPEC §3.3
+ --> tests/ui/derive-tauterror-on-struct-fail.rs:6:1
+  |
+6 | struct S {
+  | ^^^^^^

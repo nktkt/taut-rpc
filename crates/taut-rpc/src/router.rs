@@ -33,7 +33,7 @@
 //!   When the `ws` feature is enabled, [`Router::into_axum`] mounts a single
 //!   `GET /rpc/_ws` route that multiplexes subscriptions over one connection
 //!   using [`crate::wire::WsMessage`] frames. Implementation lives in
-//!   [`ws::ws_route`]. Queries and mutations remain on POST; only
+//!   `crate::ws::ws_route`. Queries and mutations remain on POST; only
 //!   subscription procedures are addressable over WS in v0.1.
 //! - Per-procedure `#[rpc(method = "GET")]` opt-in for queries (SPEC §4.1)
 //!   is still deferred — every query/mutation routes as POST.
@@ -44,7 +44,7 @@ use std::sync::Arc;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{FromRequest, Query, Request};
 use axum::http::StatusCode;
-use axum::response::sse::{Event, Sse};
+use axum::response::sse::{Event, KeepAlive, KeepAliveStream, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::Router as AxumRouter;
 use futures::stream::StreamExt;
@@ -69,8 +69,11 @@ mod ws;
 /// the IR schema.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcKindRuntime {
+    /// Read-only request/response procedure.
     Query,
+    /// State-mutating request/response procedure.
     Mutation,
+    /// Long-lived stream of values pushed to the client.
     Subscription,
 }
 
@@ -96,6 +99,23 @@ type LayerApply = Box<dyn FnMut(AxumRouter) -> AxumRouter + Send + Sync>;
 /// a `with_state(...)` builder that threads an `S: Clone + Send + Sync` through
 /// to handlers. Adding it later is non-breaking for callers that use the
 /// no-state form documented in SPEC §5.
+///
+/// # Examples
+///
+/// Build a router with a single procedure and convert it into an
+/// `axum::Router` ready to serve:
+///
+/// ```rust,ignore
+/// use taut_rpc::Router;
+///
+/// #[taut_rpc::rpc]
+/// async fn ping() -> &'static str { "pong" }
+///
+/// let app = Router::new()
+///     .procedure(__taut_proc_ping())
+///     .into_axum();
+/// // mount `app` under your axum server, e.g. axum::serve(...).
+/// ```
 #[derive(Default)]
 pub struct Router {
     procedures: Vec<ProcedureDescriptor>,
@@ -126,12 +146,11 @@ impl Router {
     /// than letting it become a runtime mystery.
     #[must_use]
     pub fn procedure(mut self, desc: ProcedureDescriptor) -> Self {
-        if self.procedures.iter().any(|p| p.name == desc.name) {
-            panic!(
-                "taut-rpc: procedure `{}` is already registered on this Router",
-                desc.name
-            );
-        }
+        assert!(
+            !self.procedures.iter().any(|p| p.name == desc.name),
+            "taut-rpc: procedure `{}` is already registered on this Router",
+            desc.name
+        );
         self.procedures.push(desc);
         self
     }
@@ -193,6 +212,7 @@ impl Router {
     /// defs are deduplicated by name across all registered procedures
     /// (procedures often share input/error types; emitting each one once
     /// keeps the IR stable for codegen).
+    #[must_use]
     pub fn ir(&self) -> crate::ir::Ir {
         let mut procedures = Vec::with_capacity(self.procedures.len());
         let mut types: Vec<crate::ir::TypeDef> = Vec::new();
@@ -219,6 +239,10 @@ impl Router {
     ///
     /// Mounts:
     /// - `GET  /rpc/_health` → `200 "ok"` (liveness probe).
+    /// - `GET  /rpc/_version` → JSON `{ "taut_rpc": "<crate-version>",
+    ///   "ir_version": <u32> }` for build/version introspection. Kept
+    ///   separate from `_health` for backwards compatibility — `_health`'s
+    ///   text/plain body is a feature.
     /// - `GET  /rpc/_procedures` → JSON array of registered procedure names.
     /// - `GET  /rpc/_ir` → full IR JSON, gated behind the `ir-export` feature.
     /// - `POST /rpc/<name>` for every registered query/mutation procedure.
@@ -232,7 +256,6 @@ impl Router {
     ///
     /// Unknown routes fall through to a SPEC §4.1 envelope:
     /// `404 {"err": {"code": "not_found", "payload": {"procedure": "<name>"}}}`.
-    #[must_use]
     pub fn into_axum(mut self) -> AxumRouter {
         // Capture the IR once up front so the `/rpc/_ir` handler can hand out
         // cheap clones of an `Arc<Ir>` rather than recomputing per-request.
@@ -250,6 +273,21 @@ impl Router {
 
         let mut app = AxumRouter::new()
             .route("/rpc/_health", axum::routing::get(|| async { "ok" }))
+            .route(
+                "/rpc/_version",
+                // SPEC §8: `_version` is intentionally separate from
+                // `_health` so monitoring tools that scrape the latter as
+                // text/plain don't see their parser change. `taut_rpc` is
+                // pulled from `CARGO_PKG_VERSION` at compile time so it
+                // tracks the crate version automatically; `ir_version`
+                // mirrors the IR schema version emitted under `/rpc/_ir`.
+                axum::routing::get(|| async {
+                    axum::Json(serde_json::json!({
+                        "taut_rpc": env!("CARGO_PKG_VERSION"),
+                        "ir_version": crate::IR_VERSION,
+                    }))
+                }),
+            )
             .route(
                 "/rpc/_procedures",
                 axum::routing::get(move || {
@@ -466,10 +504,13 @@ fn parse_input_param(raw: Option<&str>) -> Result<serde_json::Value, serde_json:
 /// std::error::Error`; we use `Infallible` because every event we produce is
 /// hand-shaped from already-deserialized `serde_json::Value`s and a
 /// `json!({...})` literal, neither of which can fail JSON serialization.
+#[allow(clippy::needless_pass_by_value)] // handler is `Arc<…>`; moving avoids a clone at the call site
 fn sse_response_for(
     handler: crate::procedure::StreamHandler,
     raw_input: Option<&str>,
-) -> Sse<futures::stream::BoxStream<'static, Result<Event, std::convert::Infallible>>> {
+) -> Sse<
+    KeepAliveStream<futures::stream::BoxStream<'static, Result<Event, std::convert::Infallible>>>,
+> {
     use futures::stream;
 
     // Both arms produce *different* concrete stream types, so erase to a
@@ -528,11 +569,12 @@ fn sse_response_for(
         Ok::<Event, std::convert::Infallible>(Event::default().event("end").data(""))
     });
 
-    // axum 0.8 changed `Sse::keep_alive` to wrap the stream in `KeepAliveStream`,
-    // which alters the return type. Drop the keep-alive for now (clients are
-    // expected to reconnect on idle timeout) — the Phase 3 wire contract
-    // doesn't require keep-alive frames anyway.
-    Sse::new(event_stream.chain(end).boxed())
+    // axum 0.8's `Sse::keep_alive` wraps the inner stream in `KeepAliveStream`,
+    // changing the response's static type from `Sse<S>` to `Sse<KeepAliveStream<S>>`.
+    // Reflecting that in the return signature lets us keep emitting keep-alive
+    // comments on idle, which is required for HTTP-aware proxies (e.g. nginx's
+    // default 60s idle timeout) that would otherwise cut the SSE connection.
+    Sse::new(event_stream.chain(end).boxed()).keep_alive(KeepAlive::default())
 }
 
 /// Fallback handler that returns the SPEC §4.1 `not_found` envelope for any
@@ -681,6 +723,85 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(&bytes[..], b"ok");
+    }
+
+    #[tokio::test]
+    async fn health_endpoint_unchanged() {
+        // `_version` was added alongside `_health` in Phase 5 — pin the
+        // contract that `_health` itself didn't change. Per SPEC §8 its
+        // text/plain `ok` body is a feature; monitoring tools that scrape
+        // it should continue to see the same wire shape after the
+        // `_version` route lands. Mirrors `health_endpoint_returns_ok`
+        // above; the duplication is deliberate so this guarantee survives
+        // independent edits to either test.
+        let app = Router::new().into_axum();
+
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/rpc/_health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let ct = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            ct.starts_with("text/plain"),
+            "expected text/plain content-type, got {ct:?}"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&bytes[..], b"ok");
+    }
+
+    #[tokio::test]
+    async fn version_endpoint_returns_json_with_version_and_ir_version() {
+        // `_version` returns a JSON object with both `taut_rpc` (the crate
+        // version, pulled from `CARGO_PKG_VERSION` at compile time) and
+        // `ir_version` (mirroring `crate::IR_VERSION`). We assert structure
+        // rather than exact strings so this test doesn't churn every time
+        // we bump the crate version — the contract is "two fields, right
+        // types, ir_version matches the constant", not "the crate version
+        // is literally 0.1.0".
+        let app = Router::new().into_axum();
+
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/rpc/_version")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).expect("body must parse as JSON");
+        assert!(
+            v["taut_rpc"].is_string(),
+            "taut_rpc field must be a string; got {v}"
+        );
+        assert_eq!(
+            v["taut_rpc"].as_str().unwrap(),
+            env!("CARGO_PKG_VERSION"),
+            "taut_rpc must match CARGO_PKG_VERSION",
+        );
+        assert_eq!(
+            v["ir_version"].as_u64(),
+            Some(u64::from(crate::IR_VERSION)),
+            "ir_version must match crate::IR_VERSION",
+        );
     }
 
     #[tokio::test]

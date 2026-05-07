@@ -1,34 +1,37 @@
-# mdBook documentation build.
+# mdBook documentation build and deploy.
 #
-# Only runs when files under docs/ (or this workflow) change. Uploads the
-# rendered book as a workflow artifact so reviewers can preview it.
+# Builds the book on every PR / push touching docs sources, and deploys to
+# GitHub Pages on push to main.
 
 name: docs
 
 on:
-  pull_request:
-    paths:
-      - 'docs/**'
-      - '.github/workflows/docs.yml'
   push:
     branches: [main]
+    paths:
+      - 'docs/**'
+      - 'SPEC.md'
+      - 'ROADMAP.md'
+      - 'CHANGELOG.md'
+      - '.github/workflows/docs.yml'
+  pull_request:
     paths:
       - 'docs/**'
       - '.github/workflows/docs.yml'
 
 permissions:
   contents: read
+  pages: write
+  id-token: write
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: docs-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
     name: build
     runs-on: ubuntu-latest
-    # TODO: drop continue-on-error once the book renders without warnings.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v6
       - uses: peaceiris/actions-mdbook@v2
@@ -36,8 +39,19 @@ jobs:
           mdbook-version: 'latest'
       - name: Build book
         run: mdbook build docs
-      - name: Upload book artifact
-        uses: actions/upload-artifact@v7
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
         with:
-          name: mdbook-site
-          path: docs/book
+          path: docs/build
+
+  deploy:
+    name: deploy
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

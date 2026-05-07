@@ -4,22 +4,18 @@ about: Suggest an enhancement or new capability for taut-rpc
 labels: enhancement
 ---
 
-## Motivation
+## Problem
 
-<!-- What problem are you trying to solve? Who benefits? -->
+<!-- What problem are you trying to solve? Who benefits, and in what scenario? -->
 
 ## Proposed solution
 
-<!-- Sketch the API, behaviour, or design you have in mind. -->
+<!-- Sketch the API, behaviour, or design you have in mind. Code samples help. -->
 
 ## Alternatives considered
 
 <!-- Other approaches you weighed and why you ruled them out. -->
 
-## Spec / Roadmap impact
+## Are you willing to contribute a PR?
 
-<!-- Does this require updates to SPEC.md or ROADMAP.md? IR_VERSION bump? -->
-
-## Additional context
-
-<!-- Examples, prior art, related issues. -->
+<!-- Yes / No / Maybe (with guidance). This helps us prioritise. -->

@@ -6,31 +6,32 @@ labels: bug
 
 ## Description
 
-<!-- Clear description of the bug. -->
+<!-- Clear, concise description of the bug. -->
 
-## Reproduction
+## Reproduction steps
 
-<!-- Minimal steps or code snippet to reproduce. -->
+<!-- Minimal steps or code snippet to reproduce. A self-contained repo or
+     `cargo new` snippet is ideal. -->
 
 1.
 2.
 3.
 
-## Expected behaviour
+## Expected behavior
 
 <!-- What you expected to happen. -->
 
-## Actual behaviour
+## Actual behavior
 
-<!-- What actually happened. Include error messages / stack traces. -->
+<!-- What actually happened. Include error messages, panics, or stack traces. -->
 
 ## Environment
 
 - taut-rpc version / commit:
+- axum version:
+- OS (and version):
 - Rust version (`rustc --version`):
-- OS:
-- (If npm client) Node version:
 
 ## Additional context
 
-<!-- Anything else that might help: logs, related issues, recent changes. -->
+<!-- Logs, related issues, recent changes, or anything else that helps. -->

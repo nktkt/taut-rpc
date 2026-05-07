@@ -1,15 +1,23 @@
 [package]
 name = "taut-rpc-macros"
-version = "0.0.0"
-description = "Procedural macros for taut-rpc"
+version = "0.1.0"
+description = "Procedural macros for taut-rpc. See the taut-rpc crate for usage."
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+homepage = "https://github.com/nktkt/taut-rpc"
+documentation = "https://docs.rs/taut-rpc-macros"
+keywords = ["rpc", "axum", "typescript", "macro", "codegen"]
+categories = ["network-programming", "development-tools::procedural-macro-helpers"]
 
 [lib]
 proc-macro = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 proc-macro2.workspace = true
@@ -23,6 +31,12 @@ trybuild = "1.0"
 # crate stays free of a runtime dep at publish time.
 taut-rpc = { path = "../taut-rpc" }
 serde = { workspace = true }
+# `rpc-stream-pass.rs` and similar fixtures use these crates by their absolute
+# paths emitted by the macro; without dev-deps the trybuild sandbox can't see them.
+futures = { workspace = true }
+async-stream = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
 
 [lints]
 workspace = true

@@ -147,6 +147,7 @@ pub struct GenArgs {
 }
 
 /// Entry point for `cargo taut gen`.
+#[allow(clippy::needless_pass_by_value)] // owned `args` matches the clap-generated dispatch convention
 pub fn run(args: GenArgs) -> Result<()> {
     let cwd = std::env::current_dir()?;
 
@@ -264,8 +265,7 @@ fn dump_ir_from_binary(bin: &std::path::Path, ir_target: &std::path::Path) -> Re
         let code = output
             .status
             .code()
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| "<terminated by signal>".to_string());
+            .map_or_else(|| "<terminated by signal>".to_string(), |c| c.to_string());
         return Err(anyhow!(
             "binary {} exited with status {} while dumping IR\n--- stderr ---\n{}",
             bin.display(),

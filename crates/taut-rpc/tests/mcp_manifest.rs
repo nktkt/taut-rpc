@@ -9,7 +9,7 @@
 //!    `__taut_proc_*()` descriptor is mounted on a `Router`, the IR pulled
 //!    via `Router::ir()`, and the resulting manifest validated.
 //!
-//! The unit-level matrix (every TypeRef variant, primitive, edge case) lives
+//! The unit-level matrix (every `TypeRef` variant, primitive, edge case) lives
 //! inline in `crates/taut-rpc-cli/src/mcp.rs`. This file is the integration
 //! glue — proving the macro→IR→manifest pipeline holds end-to-end.
 
@@ -97,12 +97,14 @@ pub struct AddInput {
 
 /// Adds two integers and returns the sum.
 #[rpc]
+#[allow(clippy::unused_async)] // `#[rpc]` requires `async fn` signatures
 async fn add_numbers(input: AddInput) -> i32 {
     input.a + input.b
 }
 
 /// Heartbeat — takes no input, returns a fixed string.
 #[rpc]
+#[allow(clippy::unused_async)] // `#[rpc]` requires `async fn` signatures
 async fn ping(_input: ()) -> String {
     "pong".into()
 }

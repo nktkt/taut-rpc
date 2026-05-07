@@ -2,7 +2,7 @@
 //!
 //! These tests cover the new Phase 2 surface area:
 //!
-//! - `#[derive(taut_rpc::TautError)]` — default snake_case `code` from variant
+//! - `#[derive(taut_rpc::TautError)]` — default `snake_case` `code` from variant
 //!   names, default `http_status` of 400, and per-variant
 //!   `#[taut(code = "...", status = N)]` overrides.
 //! - The updated `#[rpc]` error path that consults
@@ -132,7 +132,7 @@ enum RpcE {
 }
 
 #[taut_rpc::rpc]
-#[allow(clippy::unnecessary_wraps)]
+#[allow(clippy::unnecessary_wraps, clippy::unused_async)] // `#[rpc]` requires `async fn` signatures
 async fn protected_proc() -> Result<i32, RpcE> {
     Err(RpcE::Unauth)
 }
@@ -180,6 +180,7 @@ async fn rpc_macro_uses_taut_error_for_status_and_code() {
 // ---------------------------------------------------------------------------
 
 #[taut_rpc::rpc]
+#[allow(clippy::unused_async)] // `#[rpc]` requires `async fn` signatures
 async fn echo_layer() -> String {
     "hi".to_string()
 }

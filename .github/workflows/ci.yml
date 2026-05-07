@@ -78,3 +78,35 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.100
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace
+
+  examples-build:
+    name: Build examples
+    runs-on: ubuntu-latest
+    needs: rust-test
+    continue-on-error: true  # Until all examples are stable.
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - uses: Swatinem/rust-cache@v2
+      - name: Build server examples
+        run: |
+          for dir in examples/*/server; do
+            if [ -f "$dir/Cargo.toml" ]; then
+              echo "::group::cargo build in $dir"
+              (cd "$dir" && cargo build)
+              echo "::endgroup::"
+            fi
+          done
+      - name: Install client examples
+        run: |
+          # Build the npm runtime first.
+          (cd npm/taut-rpc && npm install && npm run build)
+          for dir in examples/*/client; do
+            if [ -f "$dir/package.json" ]; then
+              echo "::group::npm install in $dir"
+              (cd "$dir" && npm install)
+              echo "::endgroup::"
+            fi
+          done
