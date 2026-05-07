@@ -1,7 +1,6 @@
 [book]
 authors = ["taut-rpc contributors"]
 language = "en"
-multilingual = false
 src = "src"
 title = "taut-rpc"
 
