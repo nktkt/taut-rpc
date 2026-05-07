@@ -49,7 +49,10 @@ fn derive_type_struct_emits_typedef() {
     assert_eq!(fields[1].ty, TypeRef::Primitive(Primitive::String));
 
     // ir_type_ref points to the named type by name.
-    assert_eq!(<User as TautType>::ir_type_ref(), TypeRef::Named("User".to_string()));
+    assert_eq!(
+        <User as TautType>::ir_type_ref(),
+        TypeRef::Named("User".to_string())
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -196,7 +199,7 @@ async fn router_serves_typed_query() {
 // (f) Router serves a typed mutation taking an input struct.
 // ---------------------------------------------------------------------------
 
-#[derive(Type, Serialize, Deserialize)]
+#[derive(Type, taut_rpc::Validate, Serialize, Deserialize)]
 struct AddInput {
     a: i32,
     b: i32,
@@ -421,14 +424,17 @@ async fn ir_endpoint_returns_full_ir_when_feature_enabled() {
     let ir: Ir = serde_json::from_slice(&bytes).expect("valid Ir JSON");
     assert_eq!(ir.ir_version, Ir::CURRENT_VERSION);
     let names: Vec<&str> = ir.procedures.iter().map(|p| p.name.as_str()).collect();
-    assert!(names.contains(&"ping"), "expected `ping` in IR procedures, got {names:?}");
+    assert!(
+        names.contains(&"ping"),
+        "expected `ping` in IR procedures, got {names:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
-// (k) IR_VERSION is locked at 0 for Phase 1.
+// (k) IR_VERSION tracks the current schema version (bumped to 1 in Phase 4).
 // ---------------------------------------------------------------------------
 
 #[test]
-fn ir_version_is_zero() {
-    assert_eq!(IR_VERSION, 0);
+fn ir_version_is_current() {
+    assert_eq!(IR_VERSION, 1);
 }

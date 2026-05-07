@@ -12,20 +12,30 @@
 //! procedures onto an `axum::Router`, the [`TautError`] trait that constrains
 //! procedure error types, and the [`Validate`] bridge for input/output validation.
 //!
+//! ## v0.1 features
+//!
+//! - **Validation** (Phase 4): the [`Validate`] derive macro and [`validate`]
+//!   module provide declarative input/output validation. Constraints are
+//!   declared with `#[validate(...)]` attributes and emitted into the IR so
+//!   the generated TypeScript client can mirror server-side checks. See
+//!   [`validate::run`], [`validate::collect`], [`validate::nested`], and
+//!   [`validate::check`] for the runtime helpers used by generated code.
+//!
 //! See [`SPEC.md`](https://github.com/anthropics/taut-rpc/blob/main/SPEC.md) for
 //! the full design — wire format, type mapping, IR schema, and versioning rules.
 //! The [`IR_VERSION`] constant tracks SPEC §9.
 
-pub mod ir;
-pub mod type_map;
-pub mod wire;
-pub mod error;
-pub mod router;
-pub mod validate;
-pub mod types;
-pub mod procedure;
 pub mod dump;
+pub mod error;
+pub mod ir;
+pub mod procedure;
+pub mod router;
+pub mod type_map;
+pub mod types;
+pub mod validate;
+pub mod wire;
 
+pub use dump::{dump_if_requested, ir_json};
 pub use error::{StandardError, TautError};
 pub use procedure::{
     ProcedureBody, ProcedureDescriptor, ProcedureHandler, ProcedureResult, StreamFrame,
@@ -34,8 +44,7 @@ pub use procedure::{
 pub use router::{ProcKindRuntime, Router};
 pub use types::TautType;
 pub use validate::{Constraint, Validate, ValidationError};
-pub use dump::{dump_if_requested, ir_json};
 
-pub use taut_rpc_macros::{rpc, Type, TautError};
+pub use taut_rpc_macros::{rpc, TautError, Type, Validate};
 
-pub const IR_VERSION: u32 = 0;
+pub const IR_VERSION: u32 = 1;

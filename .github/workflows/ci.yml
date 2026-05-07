@@ -57,6 +57,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-targets
 
+  rust-test-ws:
+    name: test (ws feature)
+    runs-on: ubuntu-latest
+    # Make this required once Phase 1 lands.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --features ws
+
   rust-msrv:
     name: msrv (1.75)
     runs-on: ubuntu-latest

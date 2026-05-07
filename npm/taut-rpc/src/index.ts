@@ -87,6 +87,21 @@ export interface Transport {
 // Client options
 // ---------------------------------------------------------------------------
 
+/**
+ * Minimal duck-type for Valibot or Zod schemas. Both libraries expose a
+ * synchronous `parse(value)` method that either returns the (possibly coerced)
+ * value or throws a library-specific error. The runtime never imports either
+ * library directly — codegen wires concrete schemas in via `procedureSchemas`.
+ *
+ * On parse failure, both libraries throw an error whose `.issues` (Valibot,
+ * Zod v4) or `.errors` (Zod v3) array describes each validation problem.
+ * {@link parseValidationIssues} flattens that into a transport-neutral
+ * `{path, message}[]` payload for the SPEC error envelope.
+ */
+export interface SchemaLike {
+  parse(value: unknown): unknown;
+}
+
 export interface ClientOptions {
   /** Base URL the procedures are mounted under (e.g., `"/rpc"`). */
   url: string;
@@ -106,6 +121,27 @@ export interface ClientOptions {
    * Subscriptions are detected from the `subscribe` access regardless.
    */
   kinds?: Record<string, ProcedureKind>;
+  /**
+   * Per-procedure schema map (typically supplied by codegen as
+   * `procedureSchemas`). When an entry is present and the corresponding
+   * {@link ClientOptions.validate} toggle is not `false`, the runtime parses
+   * inputs before sending and outputs after receiving (SPEC §7).
+   *
+   * Procedures whose entry is missing — or whose `input`/`output` slot is
+   * `undefined` (e.g. codegen ran with `--validator none`) — skip validation
+   * silently; only present schemas trigger a parse.
+   */
+  schemas?: Record<string, { input?: SchemaLike; output?: SchemaLike }>;
+  /**
+   * Validation toggle. Default: `{ send: true, recv: true }` — i.e.
+   * validation is on whenever a schema is supplied. Setting either to `false`
+   * disables that direction client-wide; the `schemas` map is then ignored
+   * for that direction.
+   */
+  validate?: {
+    send?: boolean;
+    recv?: boolean;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -140,18 +176,173 @@ export type ClientOf<P> = {
 };
 
 // ---------------------------------------------------------------------------
+// Validation helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * One issue inside a validation-error payload. Mirrors the shape both Valibot
+ * and Zod produce on parse failure, normalised to the minimum every consumer
+ * needs: a stringified path through the input and a human-readable message.
+ */
+export interface ValidationIssue {
+  path: string;
+  message: string;
+}
+
+/**
+ * Convert a Valibot/Zod parse exception into a `{ path, message }[]` payload
+ * suitable for the {@link TautError} envelope. We duck-type on the error's
+ * `.issues` (Valibot, Zod v4) or `.errors` (Zod v3) array; anything else is
+ * preserved as a single issue with `path: ""` and the error's `message` (or
+ * stringified form).
+ *
+ * The shape is deliberately library-neutral so callers can switch validators
+ * without breaking error-handling code downstream.
+ */
+export function parseValidationIssues(err: unknown): ValidationIssue[] {
+  // Both libraries throw real Error subclasses; pull `issues` then `errors`
+  // before falling back to a single bag-issue derived from the message.
+  if (err && typeof err === "object") {
+    const e = err as { issues?: unknown; errors?: unknown; message?: unknown };
+    const list =
+      Array.isArray(e.issues)
+        ? e.issues
+        : Array.isArray(e.errors)
+          ? e.errors
+          : null;
+    if (list !== null) {
+      return list.map(issueToValidation);
+    }
+    if (typeof e.message === "string") {
+      return [{ path: "", message: e.message }];
+    }
+  }
+  return [{ path: "", message: typeof err === "string" ? err : String(err) }];
+}
+
+/**
+ * Normalise a single Valibot/Zod issue object into our `{ path, message }`
+ * shape.
+ *
+ * Path encoding:
+ *   - Valibot: `issue.path` is `Array<{ key: string | number }>`
+ *   - Zod v3/v4: `issue.path` is `Array<string | number>`
+ * We coerce both into a dotted/bracketed string (`"a.b[0].c"`) without
+ * importing either library.
+ */
+function issueToValidation(raw: unknown): ValidationIssue {
+  const issue = raw as { path?: unknown; message?: unknown };
+  const message =
+    typeof issue.message === "string" ? issue.message : "validation failed";
+  if (!Array.isArray(issue.path)) return { path: "", message };
+  const parts: string[] = [];
+  for (const seg of issue.path) {
+    // Valibot wraps each segment in `{ key, value, ... }`.
+    const key =
+      seg !== null && typeof seg === "object" && "key" in (seg as object)
+        ? (seg as { key: unknown }).key
+        : seg;
+    if (typeof key === "number") {
+      parts.push(`[${key}]`);
+    } else if (typeof key === "string") {
+      parts.push(parts.length === 0 ? key : `.${key}`);
+    } else {
+      parts.push(`[${String(key)}]`);
+    }
+  }
+  return { path: parts.join(""), message };
+}
+
+/**
+ * Run a {@link SchemaLike}.parse(), translating any thrown Valibot/Zod error
+ * into a {@link TautError} with code `"validation_error"`, payload `{ issues }`,
+ * and HTTP status `0` (no network exchange occurred). The `direction`
+ * discriminant lets callers tell input vs. output failures apart in logs.
+ */
+function runSchemaParse(
+  schema: SchemaLike,
+  value: unknown,
+  direction: "input" | "output",
+): unknown {
+  try {
+    return schema.parse(value);
+  } catch (err) {
+    const issues = parseValidationIssues(err);
+    throw new _TautError(
+      "validation_error",
+      { direction, issues },
+      0,
+    );
+  }
+}
+
+/**
+ * Wrap an `AsyncIterable<O>` so each yielded value is fed through
+ * `schema.parse()` before being surfaced. The wrapper preserves the inner
+ * iterator's `return`/`throw` plumbing so consumer-driven cancellation
+ * (`break` / early `return` / thrown exceptions inside `for await`) still
+ * cancels the underlying transport.
+ *
+ * Output validation happens per-frame so the consumer of a long-lived
+ * subscription notices a malformed frame at the moment it arrives, rather
+ * than the whole stream being eagerly drained up front.
+ */
+function validateAsyncIterable<O>(
+  inner: AsyncIterable<O>,
+  schema: SchemaLike,
+): AsyncIterable<O> {
+  return {
+    [Symbol.asyncIterator](): AsyncIterator<O> {
+      const it = inner[Symbol.asyncIterator]();
+      // Build the iterator with `exactOptionalPropertyTypes` in mind: we
+      // only set `return` / `throw` when the inner iterator exposes them,
+      // so the wrapper preserves cancellation semantics without inventing
+      // them (and without assigning `undefined` to optional slots).
+      const wrapped: AsyncIterator<O> = {
+        async next(): Promise<IteratorResult<O>> {
+          const r = await it.next();
+          if (r.done) return r;
+          const validated = runSchemaParse(schema, r.value, "output") as O;
+          return { value: validated, done: false };
+        },
+      };
+      if (it.return) {
+        const innerReturn = it.return.bind(it);
+        wrapped.return = (value?: O): Promise<IteratorResult<O>> =>
+          innerReturn(value) as Promise<IteratorResult<O>>;
+      }
+      if (it.throw) {
+        const innerThrow = it.throw.bind(it);
+        wrapped.throw = (e?: unknown): Promise<IteratorResult<O>> =>
+          innerThrow(e) as Promise<IteratorResult<O>>;
+      }
+      return wrapped;
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // createClient
 // ---------------------------------------------------------------------------
 
 /** Sentinel marking the root proxy so we can detect it in nested gets. */
 const ROOT = Symbol("taut.client.root");
 
+/**
+ * Resolved validation state for the proxy. Pre-computing the booleans means
+ * the per-call hot path doesn't re-check `validate.send !== false` on every
+ * request.
+ */
+interface ProxyContext {
+  transport: Transport;
+  kinds: Record<string, ProcedureKind> | undefined;
+  schemas: Record<string, { input?: SchemaLike; output?: SchemaLike }> | undefined;
+  validateSend: boolean;
+  validateRecv: boolean;
+}
+
 /** Internal: build a chainable proxy that accumulates a dotted name path. */
-function makeProxy(
-  transport: Transport,
-  path: readonly string[],
-  kinds: Record<string, ProcedureKind> | undefined,
-): any {
+function makeProxy(ctx: ProxyContext, path: readonly string[]): any {
   // The target is a function so the proxy is callable.
   const target = (() => {}) as any;
 
@@ -162,11 +353,26 @@ function makeProxy(
       // `subscribe` at any depth ≥ 1 marks the leaf as a subscription.
       // We return a function that fires the subscribe call with the path so far.
       if (prop === "subscribe" && path.length > 0) {
-        return (input?: unknown) =>
-          transport.subscribe(path.join("."), input);
+        return (input?: unknown): AsyncIterable<unknown> => {
+          const name = path.join(".");
+          const entry = ctx.schemas?.[name];
+          // Pre-call input validation: throws synchronously (well, before the
+          // first iterator pull) so the consumer sees a TautError on `next()`.
+          // We run it eagerly here rather than inside the wrapped iterable so
+          // misuse fails before any network/SSE work begins.
+          let validatedInput: unknown = input;
+          if (ctx.validateSend && entry?.input) {
+            validatedInput = runSchemaParse(entry.input, input, "input");
+          }
+          const stream = ctx.transport.subscribe(name, validatedInput);
+          if (ctx.validateRecv && entry?.output) {
+            return validateAsyncIterable(stream, entry.output);
+          }
+          return stream;
+        };
       }
       // Otherwise extend the path.
-      return makeProxy(transport, [...path, prop], kinds);
+      return makeProxy(ctx, [...path, prop]);
     },
     apply(_t, _thisArg, args) {
       // Direct call: query or mutation. We resolve the kind via the optional
@@ -175,8 +381,31 @@ function makeProxy(
       // header differs and is informational.
       const name = path.join(".");
       const input = args.length === 0 ? undefined : args[0];
-      const kind: ProcedureKind = kinds?.[name] ?? "query";
-      return transport.call(name, kind, input);
+      const kind: ProcedureKind = ctx.kinds?.[name] ?? "query";
+      const entry = ctx.schemas?.[name];
+
+      // Pre-send input validation. Per SPEC §7 this fails BEFORE the network
+      // call, surfacing a TautError("validation_error") rather than a 4xx.
+      // Zero-arg procedures pass `undefined` here; the wire shape uses JSON
+      // null, so we coerce before parsing so a `v.null()` schema matches.
+      const inputForParse = input === undefined ? null : input;
+      let validatedInput: unknown = inputForParse;
+      if (ctx.validateSend && entry?.input) {
+        validatedInput = runSchemaParse(entry.input, inputForParse, "input");
+      }
+
+      const result = ctx.transport.call(name, kind, validatedInput);
+
+      // Post-receive output validation. We only parse on the success path —
+      // error envelopes (`TautError` thrown from the transport) propagate
+      // unchanged.
+      if (ctx.validateRecv && entry?.output) {
+        const outputSchema = entry.output;
+        return result.then((value) =>
+          runSchemaParse(outputSchema, value, "output"),
+        );
+      }
+      return result;
     },
   });
 }
@@ -193,12 +422,25 @@ function makeProxy(
  *
  * Static type-safety comes entirely from `P` (the user's generated
  * `Procedures` map); the runtime is duck-typed.
+ *
+ * When `schemas` is supplied (typically by codegen), inputs are parsed before
+ * sending and outputs are parsed after receiving (SPEC §7). Either direction
+ * can be disabled by setting `validate.send` / `validate.recv` to `false`.
+ * Procedures whose entry is missing in `schemas` skip validation silently —
+ * this is the `--validator none` codegen path.
  */
 export function createClient<P>(
   opts: ClientOptions,
 ): ClientOf<P> {
   const transport = opts.transport ?? defaultTransport(opts);
-  return makeProxy(transport, [], opts.kinds) as ClientOf<P>;
+  const ctx: ProxyContext = {
+    transport,
+    kinds: opts.kinds,
+    schemas: opts.schemas,
+    validateSend: opts.validate?.send !== false,
+    validateRecv: opts.validate?.recv !== false,
+  };
+  return makeProxy(ctx, []) as ClientOf<P>;
 }
 
 /**
@@ -406,118 +648,268 @@ export function errorMatch<E extends _TautError<string, unknown>, R>(
 // In-source tests (vitest)
 // ---------------------------------------------------------------------------
 
-// TODO(taut-rpc): vitest is not yet configured in this package. Once the test
-// harness lands, uncomment the block below and ensure tsconfig sets
-// `"types": ["vitest/importMeta"]` (or augment ImportMeta) so `import.meta.vitest`
-// type-checks.
+// PSEUDO-CODE in-source tests. The body below is wrapped in an
+// `if (import.meta.vitest)` guard, which Vite's vitest plugin rewrites to
+// `undefined` for production builds and to the live module under test inside
+// the harness. Until vitest is wired (and `tsconfig` adds
+// `"types": ["vitest/importMeta"]` or augments ImportMeta), the guard is
+// always falsy at runtime and the body never executes — these tests are
+// documentation of the contract, exercised by `tsc` today and activated
+// the moment the test harness lands.
 //
-// if (import.meta.vitest) {
-//   const { describe, it, expect, vi } = import.meta.vitest;
-//
-//   describe("createClient proxy", () => {
-//     const fakeTransport: Transport = {
-//       call: vi.fn(async (_name, _kind, _input) => ({ ok: true }) as any),
-//       subscribe: vi.fn((_name, _input) => ({
-//         [Symbol.asyncIterator]: async function* () {
-//           yield 1 as any;
-//           yield 2 as any;
-//         },
-//       })),
-//     };
-//
-//     it("dotted access composes to a procedure name", async () => {
-//       const c = createClient<any>({ url: "/rpc", transport: fakeTransport });
-//       await (c as any).users.get({ id: 1 });
-//       expect(fakeTransport.call).toHaveBeenCalledWith("users.get", "query", { id: 1 });
-//     });
-//
-//     it("flat access works too", async () => {
-//       const c = createClient<any>({ url: "/rpc", transport: fakeTransport });
-//       await (c as any)["users.get"]({ id: 1 });
-//       expect(fakeTransport.call).toHaveBeenCalledWith("users.get", "query", { id: 1 });
-//     });
-//
-//     it("subscribe returns an async iterable", async () => {
-//       const c = createClient<any>({ url: "/rpc", transport: fakeTransport });
-//       const out: number[] = [];
-//       for await (const v of (c as any).userEvents.subscribe({ userId: 1 })) {
-//         out.push(v);
-//       }
-//       expect(out).toEqual([1, 2]);
-//       expect(fakeTransport.subscribe).toHaveBeenCalledWith("userEvents", { userId: 1 });
-//     });
-//
-//     it("zero-arg call passes undefined input", async () => {
-//       const c = createClient<any>({ url: "/rpc", transport: fakeTransport });
-//       await (c as any).ping();
-//       expect(fakeTransport.call).toHaveBeenCalledWith("ping", "query", undefined);
-//     });
-//   });
-//
-//   describe("error narrowing helpers", () => {
-//     it("isTautError() with no args narrows to TautError", () => {
-//       const e: unknown = new _TautError("boom", { reason: "x" }, 500);
-//       expect(isTautError(e)).toBe(true);
-//       expect(isTautError(new Error("plain"))).toBe(false);
-//       expect(isTautError("string error")).toBe(false);
-//     });
-//
-//     it("isTautError(err, code) matches only the given code", () => {
-//       const overflow: unknown = new _TautError("overflow", null, 400);
-//       const underflow: unknown = new _TautError("underflow", null, 400);
-//       expect(isTautError(overflow, "overflow")).toBe(true);
-//       expect(isTautError(underflow, "overflow")).toBe(false);
-//     });
-//
-//     it("isTautError<C, P> narrows payload statically", () => {
-//       type NotFoundPayload = { id: number };
-//       const e: unknown = new _TautError("not_found", { id: 7 }, 404);
-//       if (isTautError<"not_found", NotFoundPayload>(e, "not_found")) {
-//         // Type-level: e.payload is NotFoundPayload here.
-//         expect(e.payload.id).toBe(7);
-//       } else {
-//         throw new Error("expected narrowing to succeed");
-//       }
-//     });
-//
-//     it("assertTautError throws on non-TautError values", () => {
-//       const plain = new Error("plain");
-//       expect(() => assertTautError(plain)).toThrow(plain);
-//       expect(() => assertTautError("not an error")).toThrow();
-//       const taut = new _TautError("ok_code", null, 400);
-//       expect(() => assertTautError(taut)).not.toThrow();
-//       // With a code, mismatched codes re-throw.
-//       expect(() => assertTautError(taut, "other_code")).toThrow(taut);
-//     });
-//
-//     it("errorMatch dispatches to the matching arm and re-throws others", () => {
-//       type AddErr =
-//         | _TautError<"overflow", null>
-//         | _TautError<"underflow", null>;
-//       const overflow: unknown = new _TautError("overflow", null, 400);
-//       const result = errorMatch<AddErr, string>(overflow, {
-//         overflow: () => "hi-overflow",
-//         underflow: () => "hi-underflow",
-//       });
-//       expect(result).toBe("hi-overflow");
-//
-//       // Unmatched code with no defaultArm re-throws.
-//       const other: unknown = new _TautError("other", null, 400);
-//       expect(() =>
-//         errorMatch<AddErr, string>(other as any, {
-//           overflow: () => "hi-overflow",
-//           underflow: () => "hi-underflow",
-//         }),
-//       ).toThrow();
-//
-//       // Non-TautError propagates unchanged.
-//       const plain = new Error("plain");
-//       expect(() =>
-//         errorMatch<AddErr, string>(plain, {
-//           overflow: () => "hi-overflow",
-//           underflow: () => "hi-underflow",
-//         }),
-//       ).toThrow(plain);
-//     });
-//   });
-// }
+// The `// @ts-ignore` on the guard line isolates the only spot that needs
+// vitest's ImportMeta augmentation. Everything inside is regular TS that
+// typechecks on its own merits.
+// @ts-ignore vitest ImportMeta augmentation not yet installed
+if (import.meta.vitest) {
+  // @ts-ignore vitest ImportMeta augmentation not yet installed
+  const { describe, it, expect, vi } = import.meta.vitest;
+
+  describe("createClient proxy", () => {
+    const fakeTransport: Transport = {
+      call: vi.fn(async (_name: string, _kind: ProcedureKind, _input: unknown) => ({ ok: true }) as any),
+      subscribe: vi.fn((_name: string, _input: unknown) => ({
+        [Symbol.asyncIterator]: async function* () {
+          yield 1 as any;
+          yield 2 as any;
+        },
+      })),
+    };
+
+    it("dotted access composes to a procedure name", async () => {
+      const c = createClient<any>({ url: "/rpc", transport: fakeTransport });
+      await (c as any).users.get({ id: 1 });
+      expect(fakeTransport.call).toHaveBeenCalledWith("users.get", "query", { id: 1 });
+    });
+
+    it("flat access works too", async () => {
+      const c = createClient<any>({ url: "/rpc", transport: fakeTransport });
+      await (c as any)["users.get"]({ id: 1 });
+      expect(fakeTransport.call).toHaveBeenCalledWith("users.get", "query", { id: 1 });
+    });
+
+    it("subscribe returns an async iterable", async () => {
+      const c = createClient<any>({ url: "/rpc", transport: fakeTransport });
+      const out: number[] = [];
+      for await (const v of (c as any).userEvents.subscribe({ userId: 1 })) {
+        out.push(v as number);
+      }
+      expect(out).toEqual([1, 2]);
+      expect(fakeTransport.subscribe).toHaveBeenCalledWith("userEvents", { userId: 1 });
+    });
+
+    it("zero-arg call passes undefined input", async () => {
+      const c = createClient<any>({ url: "/rpc", transport: fakeTransport });
+      await (c as any).ping();
+      expect(fakeTransport.call).toHaveBeenCalledWith("ping", "query", undefined);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Validation hooks (Phase 4)
+  //
+  // These exercise the `schemas` + `validate` knobs Agent 9 added to
+  // ClientOptions. Each test is PSEUDO-CODE: it documents the runtime
+  // contract without depending on a real validator (Valibot/Zod). We
+  // hand-roll `SchemaLike` objects whose `parse` either echoes the value
+  // (success) or throws an object shaped like a Valibot/Zod error (failure
+  // path picked up by `parseValidationIssues`).
+  // -------------------------------------------------------------------------
+
+  describe("createClient validation hooks", () => {
+    /** SchemaLike that accepts every value unchanged. */
+    const passThroughSchema: SchemaLike = {
+      parse: (v: unknown) => v,
+    };
+
+    /**
+     * SchemaLike that always throws a Valibot/Zod-shaped error. The
+     * `.issues` array is what `parseValidationIssues` keys off, so the
+     * resulting TautError lands with a non-empty `issues` payload.
+     */
+    const rejectingSchema: SchemaLike = {
+      parse: (_v: unknown): unknown => {
+        throw {
+          issues: [{ path: [{ key: "id" }], message: "expected number" }],
+        };
+      },
+    };
+
+    /** Echoing transport: returns whatever it was given as the `ok` payload. */
+    const makeEchoTransport = (): Transport => ({
+      call: vi.fn(async (_name: string, _kind: ProcedureKind, input: unknown) => input),
+      subscribe: vi.fn((_name: string, input: unknown) => ({
+        [Symbol.asyncIterator]: async function* () {
+          yield input as any;
+        },
+      })),
+    });
+
+    it("validate.send=true with a matching schema accepts input", async () => {
+      const t = makeEchoTransport();
+      const c = createClient<any>({
+        url: "/rpc",
+        transport: t,
+        schemas: {
+          "users.get": { input: passThroughSchema },
+        },
+        validate: { send: true },
+      });
+      // No throw expected; the schema's parse() is a pure pass-through.
+      const out = await (c as any).users.get({ id: 1 });
+      expect(t.call).toHaveBeenCalledWith("users.get", "query", { id: 1 });
+      expect(out).toEqual({ id: 1 });
+    });
+
+    it("validate.send=true rejects input via schema.parse failure", async () => {
+      const t = makeEchoTransport();
+      const c = createClient<any>({
+        url: "/rpc",
+        transport: t,
+        schemas: {
+          "users.get": { input: rejectingSchema },
+        },
+        validate: { send: true },
+      });
+      await expect((c as any).users.get({ id: "not-a-number" })).rejects.toMatchObject({
+        code: "validation_error",
+        payload: { direction: "input" },
+      });
+      // The transport must NOT be called when input validation fails.
+      expect(t.call).not.toHaveBeenCalled();
+    });
+
+    it("validate.send=false bypasses schema check", async () => {
+      const t = makeEchoTransport();
+      const c = createClient<any>({
+        url: "/rpc",
+        transport: t,
+        schemas: {
+          "users.get": { input: rejectingSchema },
+        },
+        validate: { send: false },
+      });
+      // Even though the schema would throw, validate.send=false skips the
+      // parse step entirely — the call reaches the transport unchanged.
+      const out = await (c as any).users.get({ id: "not-a-number" });
+      expect(t.call).toHaveBeenCalledWith(
+        "users.get",
+        "query",
+        { id: "not-a-number" },
+      );
+      expect(out).toEqual({ id: "not-a-number" });
+    });
+
+    it("validate.recv=true triggers output parse", async () => {
+      const outputSchema: SchemaLike = {
+        parse: vi.fn((v: unknown) => v),
+      };
+      const t = makeEchoTransport();
+      const c = createClient<any>({
+        url: "/rpc",
+        transport: t,
+        schemas: {
+          "users.get": { output: outputSchema },
+        },
+        validate: { recv: true },
+      });
+      await (c as any).users.get({ id: 1 });
+      // The output schema's parse must run exactly once with the transport's
+      // returned value (here echoed back: `{ id: 1 }`).
+      expect(outputSchema.parse).toHaveBeenCalledTimes(1);
+      expect(outputSchema.parse).toHaveBeenCalledWith({ id: 1 });
+    });
+
+    it("procedureSchemas[unknownProc] === undefined → no validation", async () => {
+      // The schemas map only knows about `users.get`; calling `users.list`
+      // must skip validation silently (the `--validator none` codegen path
+      // and the missing-entry fast path share this behavior).
+      const inputSpy: SchemaLike = { parse: vi.fn((v: unknown) => v) };
+      const outputSpy: SchemaLike = { parse: vi.fn((v: unknown) => v) };
+      const t = makeEchoTransport();
+      const c = createClient<any>({
+        url: "/rpc",
+        transport: t,
+        schemas: {
+          "users.get": { input: inputSpy, output: outputSpy },
+        },
+        // Defaults: validate.send=true, validate.recv=true.
+      });
+      await (c as any).users.list({ page: 1 });
+      expect(inputSpy.parse).not.toHaveBeenCalled();
+      expect(outputSpy.parse).not.toHaveBeenCalled();
+      expect(t.call).toHaveBeenCalledWith(
+        "users.list",
+        "query",
+        { page: 1 },
+      );
+    });
+  });
+
+  describe("error narrowing helpers", () => {
+    it("isTautError() with no args narrows to TautError", () => {
+      const e: unknown = new _TautError("boom", { reason: "x" }, 500);
+      expect(isTautError(e)).toBe(true);
+      expect(isTautError(new Error("plain"))).toBe(false);
+      expect(isTautError("string error")).toBe(false);
+    });
+
+    it("isTautError(err, code) matches only the given code", () => {
+      const overflow: unknown = new _TautError("overflow", null, 400);
+      const underflow: unknown = new _TautError("underflow", null, 400);
+      expect(isTautError(overflow, "overflow")).toBe(true);
+      expect(isTautError(underflow, "overflow")).toBe(false);
+    });
+
+    it("isTautError<C, P> narrows payload statically", () => {
+      type NotFoundPayload = { id: number };
+      const e: unknown = new _TautError("not_found", { id: 7 }, 404);
+      if (isTautError<"not_found", NotFoundPayload>(e, "not_found")) {
+        // Type-level: e.payload is NotFoundPayload here.
+        expect(e.payload.id).toBe(7);
+      } else {
+        throw new Error("expected narrowing to succeed");
+      }
+    });
+
+    it("assertTautError throws on non-TautError values", () => {
+      const plain = new Error("plain");
+      expect(() => assertTautError(plain)).toThrow(plain);
+      expect(() => assertTautError("not an error")).toThrow();
+      const taut = new _TautError("ok_code", null, 400);
+      expect(() => assertTautError(taut)).not.toThrow();
+      // With a code, mismatched codes re-throw.
+      expect(() => assertTautError(taut, "other_code")).toThrow(taut);
+    });
+
+    it("errorMatch dispatches to the matching arm and re-throws others", () => {
+      type AddErr =
+        | _TautError<"overflow", null>
+        | _TautError<"underflow", null>;
+      const overflow: unknown = new _TautError("overflow", null, 400);
+      const result = errorMatch<AddErr, string>(overflow, {
+        overflow: () => "hi-overflow",
+        underflow: () => "hi-underflow",
+      });
+      expect(result).toBe("hi-overflow");
+
+      // Unmatched code with no defaultArm re-throws.
+      const other: unknown = new _TautError("other", null, 400);
+      expect(() =>
+        errorMatch<AddErr, string>(other as any, {
+          overflow: () => "hi-overflow",
+          underflow: () => "hi-underflow",
+        }),
+      ).toThrow();
+
+      // Non-TautError propagates unchanged.
+      const plain = new Error("plain");
+      expect(() =>
+        errorMatch<AddErr, string>(plain, {
+          overflow: () => "hi-overflow",
+          underflow: () => "hi-underflow",
+        }),
+      ).toThrow(plain);
+    });
+  });
+}

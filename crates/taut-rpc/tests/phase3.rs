@@ -26,7 +26,7 @@ use axum::body::Body;
 use http::Request as HttpRequest;
 use tower::ServiceExt;
 
-use taut_rpc::ir::{HttpMethod, ProcKind, Primitive, TypeRef};
+use taut_rpc::ir::{HttpMethod, Primitive, ProcKind, TypeRef};
 use taut_rpc::procedure::ProcedureBody;
 use taut_rpc::ProcKindRuntime;
 
@@ -44,7 +44,7 @@ use taut_rpc::ProcKindRuntime;
 /// Typed input for the `ticks` subscription. Exercises the
 /// `#[rpc(stream)]` + `#[derive(taut_rpc::Type)]` pairing on the input side
 /// (the codegen path needs this to surface the input as a TS type).
-#[derive(serde::Serialize, serde::Deserialize, taut_rpc::Type)]
+#[derive(serde::Serialize, serde::Deserialize, taut_rpc::Type, taut_rpc::Validate)]
 #[allow(dead_code)]
 struct TicksInput {
     count: u64,
@@ -280,9 +280,18 @@ async fn subscription_with_no_query_param_decodes_as_null() {
     let body = body_string(response).await;
 
     // Three data frames + end, same as the explicit `?input=null` case.
-    assert!(body.contains("event: data\ndata: 0\n\n"), "missing tick 0: {body}");
-    assert!(body.contains("event: data\ndata: 1\n\n"), "missing tick 1: {body}");
-    assert!(body.contains("event: data\ndata: 2\n\n"), "missing tick 2: {body}");
+    assert!(
+        body.contains("event: data\ndata: 0\n\n"),
+        "missing tick 0: {body}"
+    );
+    assert!(
+        body.contains("event: data\ndata: 1\n\n"),
+        "missing tick 1: {body}"
+    );
+    assert!(
+        body.contains("event: data\ndata: 2\n\n"),
+        "missing tick 2: {body}"
+    );
     assert!(body.contains("event: end"), "missing end frame: {body}");
 }
 
@@ -360,8 +369,14 @@ async fn unary_and_stream_can_coexist_on_same_router() {
         .expect("streaming oneshot dispatch");
     assert_eq!(streaming.status(), http::StatusCode::OK);
     let stream_body = body_string(streaming).await;
-    assert!(stream_body.contains("event: data\ndata: 0\n\n"), "missing tick 0: {stream_body}");
-    assert!(stream_body.contains("event: end"), "missing end frame: {stream_body}");
+    assert!(
+        stream_body.contains("event: data\ndata: 0\n\n"),
+        "missing tick 0: {stream_body}"
+    );
+    assert!(
+        stream_body.contains("event: end"),
+        "missing end frame: {stream_body}"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -556,6 +556,7 @@ mod tests {
                     optional: false,
                     undefined: false,
                     doc: None,
+                    constraints: vec![],
                 }]),
             }],
         };
@@ -596,6 +597,7 @@ mod tests {
                         optional: false,
                         undefined: false,
                         doc: None,
+                        constraints: vec![],
                     },
                     Field {
                         name: "nickname".into(),
@@ -603,6 +605,7 @@ mod tests {
                         optional: true,
                         undefined: false,
                         doc: None,
+                        constraints: vec![],
                     },
                 ]),
             }],
@@ -639,6 +642,7 @@ mod tests {
                                 optional: false,
                                 undefined: false,
                                 doc: None,
+                                constraints: vec![],
                             }]),
                         },
                     ],
@@ -808,6 +812,7 @@ mod tests {
                         optional: false,
                         undefined: false,
                         doc: None,
+                        constraints: vec![],
                     }]),
                 },
                 TypeDef {
@@ -819,6 +824,7 @@ mod tests {
                         optional: false,
                         undefined: false,
                         doc: None,
+                        constraints: vec![],
                     }]),
                 },
                 TypeDef {
@@ -854,6 +860,7 @@ mod tests {
                     optional: false,
                     undefined: false,
                     doc: None,
+                    constraints: vec![],
                 }]),
             }],
         };

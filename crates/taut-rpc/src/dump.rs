@@ -71,10 +71,7 @@ pub fn dump_if_requested(router: &Router) {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 if let Err(e) = std::fs::create_dir_all(parent) {
-                    eprintln!(
-                        "taut-rpc: failed to create {}: {e}",
-                        parent.display()
-                    );
+                    eprintln!("taut-rpc: failed to create {}: {e}", parent.display());
                     std::process::exit(2);
                 }
             }

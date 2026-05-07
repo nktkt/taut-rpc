@@ -21,6 +21,7 @@
 
 // `.js` extension because tsconfig is set to NodeNext / ESM. Codegen output.
 import { createApi } from "./api.gen.js";
+import { TautError } from "taut-rpc";
 
 // HTTP transport already prefixes `/rpc/<name>` (and uses GET + SSE for
 // subscriptions per SPEC §4.2), so the URL is the origin only.
@@ -45,6 +46,30 @@ async function main(): Promise<void> {
   console.log("server_time:");
   for await (const t of client.server_time.subscribe()) {
     console.log("  t:", t);
+  }
+
+  // Phase 4: `TicksInput` carries `#[derive(taut_rpc::Validate)]` with
+  // `count` capped at 100 and `interval_ms` constrained to `[10, 60_000]`.
+  // The server rejects out-of-range inputs before the stream is opened, so
+  // the client never receives a partial sequence — instead the
+  // `subscribe()` call throws a `TautError` with `code === "validation_error"`.
+  // We exercise that path here with `count = 200n` (above the max of 100).
+  try {
+    for await (const _ of client.ticks.subscribe({
+      count: 200n,
+      interval_ms: 1000n,
+    })) {
+      // Should be unreachable: the server validates before yielding any
+      // values, so the SSE stream never opens.
+    }
+    console.error("expected validation_error, got success");
+    process.exit(1);
+  } catch (e: unknown) {
+    if (e instanceof TautError) {
+      console.log("rejected (count=200):", e.code);
+    } else {
+      throw e;
+    }
   }
 
   console.log("done");

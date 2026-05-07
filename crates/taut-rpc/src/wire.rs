@@ -76,7 +76,9 @@ pub enum SubFrame<T, E> {
     Error(ErrEnvelope<E>),
     End,
     /// Optional protocol-version marker (subscription only, per SPEC §9).
-    V { v: u32 },
+    V {
+        v: u32,
+    },
 }
 
 /// WebSocket envelope (alternative transport). Same `{type, payload}` shape, different framing.

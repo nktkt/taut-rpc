@@ -141,3 +141,5 @@ Each line corresponds to one of the demo's five steps:
 - It does **not** propagate the authenticated `User` into procedure bodies
   via a typed extractor. That requires `State<S>` / extension support on
   `#[rpc]`, which is Phase 3.
+- Phase 4's input validation (`Validate`) also runs on this example's
+  procedures — no-op here, since all three procedures take zero input fields.

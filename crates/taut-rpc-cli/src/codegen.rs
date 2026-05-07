@@ -1,14 +1,15 @@
-//! TypeScript codegen for `cargo taut gen` (Phase 1 + 2 error narrowing).
+//! TypeScript codegen for `cargo taut gen` (Phase 1 + 2 error narrowing,
+//! Phase 4 validator schemas).
 //!
 //! Pure logic: takes an [`ir::Ir`] document and renders a single
 //! `api.gen.ts` source string. The CLI's `gen` subcommand owns the I/O and
 //! validator-flag parsing; this module owns the string-building.
 //!
-//! See `SPEC.md` §3 (type mapping), §3.3/§4.1 (error envelope), and §6
-//! (client API). The shape of the generated client mirrors the runtime
-//! declarations in `npm/taut-rpc/src/index.ts` — every emitted procedure is
-//! a `ProcedureDef<I, O, E, Kind>`, and the final `Procedures` type map is
-//! what `createClient<Procedures>` consumes.
+//! See `SPEC.md` §3 (type mapping), §3.3/§4.1 (error envelope), §6 (client
+//! API), and §7 (validation bridge). The shape of the generated client
+//! mirrors the runtime declarations in `npm/taut-rpc/src/index.ts` — every
+//! emitted procedure is a `ProcedureDef<I, O, E, Kind>`, and the final
+//! `Procedures` type map is what `createClient<Procedures>` consumes.
 //!
 //! Phase 2 additions:
 //! - For each procedure with a non-empty error set we also emit a
@@ -18,20 +19,34 @@
 //!   `createClient` can dispatch query vs. mutation vs. subscription without
 //!   the caller having to thread the map manually. `createApi` defaults to
 //!   it but still lets users override via `opts.kinds`.
+//!
+//! Phase 4 additions:
+//! - For each `TypeDef` we additionally emit a `<Name>Schema` const using the
+//!   selected validator (`valibot` is the default, `zod` is opt-in). The
+//!   pre-existing TS interface is preserved verbatim so callers who only
+//!   want types can keep ignoring the schema.
+//! - For each procedure we emit `Proc_<name>_inputSchema` and
+//!   `Proc_<name>_outputSchema` constants — either an alias to an existing
+//!   `<Name>Schema` (for `Named` types) or an inline expression (for
+//!   primitives / composites that don't have a TypeDef of their own).
+//! - We emit a `procedureSchemas` runtime map mirroring `procedureKinds` so
+//!   `createClient` can locate a procedure's schemas by name.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use taut_rpc::ir::{
-    EnumDef, Field, Ir, Procedure, TypeDef, TypeRef, TypeShape, Variant, VariantPayload,
+    Constraint, EnumDef, Field, Ir, Primitive, Procedure, TypeDef, TypeRef, TypeShape, Variant,
+    VariantPayload,
 };
 use taut_rpc::type_map::{self, BigIntStrategy};
 
 /// Validator runtime to target in the generated client.
 ///
-/// Mirrors the CLI flag of the same name (see `commands/gen.rs`). For Phase 1
-/// the `Valibot` and `Zod` choices only emit a TODO breadcrumb — the real
-/// schema rendering is Phase 4.
+/// Mirrors the CLI flag of the same name (see `commands/gen.rs`). Phase 4 wires
+/// `Valibot` and `Zod` through to real schema emission; `None` skips schema
+/// emission entirely (no `<Name>Schema` consts, no `procedureSchemas` map, no
+/// runtime import added).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Validator {
     Valibot,
@@ -79,13 +94,14 @@ pub fn render_ts_checked(ir: &Ir, opts: &CodegenOptions) -> Result<String, Strin
     let tm_opts = type_map_options(opts);
 
     write_header(&mut out, ir);
-    write_imports(&mut out);
+    write_imports(&mut out, opts.validator);
     write_types(&mut out, ir, &tm_opts)?;
+    write_schemas(&mut out, ir, opts.validator, &tm_opts);
     write_procedures(&mut out, ir, &tm_opts);
     write_procedures_map(&mut out, ir);
     write_procedure_kinds(&mut out, ir);
+    write_procedure_schemas(&mut out, ir, opts.validator, &tm_opts);
     write_create_api(&mut out);
-    write_validator_stub(&mut out, opts.validator);
 
     Ok(out)
 }
@@ -109,18 +125,18 @@ fn write_header(out: &mut String, ir: &Ir) {
     out.push('\n');
 }
 
-fn write_imports(out: &mut String) {
+fn write_imports(out: &mut String, validator: Validator) {
     out.push_str("import type { ProcedureDef } from \"taut-rpc\";\n");
-    out.push_str(
-        "import { createClient, type ClientOptions, type ClientOf } from \"taut-rpc\";\n\n",
-    );
+    out.push_str("import { createClient, type ClientOptions, type ClientOf } from \"taut-rpc\";\n");
+    match validator {
+        Validator::Valibot => out.push_str("import * as v from \"valibot\";\n"),
+        Validator::Zod => out.push_str("import { z } from \"zod\";\n"),
+        Validator::None => {}
+    }
+    out.push('\n');
 }
 
-fn write_types(
-    out: &mut String,
-    ir: &Ir,
-    tm_opts: &type_map::Options,
-) -> Result<(), String> {
+fn write_types(out: &mut String, ir: &Ir, tm_opts: &type_map::Options) -> Result<(), String> {
     // Dedup-by-name. Equal duplicates collapse silently; conflicting ones
     // are an error so we don't silently drop information.
     let mut seen: BTreeMap<&str, &TypeDef> = BTreeMap::new();
@@ -229,8 +245,10 @@ fn write_variant(
                     variant = quoted(&v.name),
                 );
             } else {
-                let inner: Vec<String> =
-                    elems.iter().map(|t| type_map::render_type(t, tm_opts)).collect();
+                let inner: Vec<String> = elems
+                    .iter()
+                    .map(|t| type_map::render_type(t, tm_opts))
+                    .collect();
                 let _ = writeln!(
                     out,
                     "  | {{ {tag}: {variant}, payload: [{payload}] }}{terminator}",
@@ -248,11 +266,7 @@ fn write_variant(
                 );
                 return;
             }
-            let _ = writeln!(
-                out,
-                "  | {{ {tag}: {variant},",
-                variant = quoted(&v.name),
-            );
+            let _ = writeln!(out, "  | {{ {tag}: {variant},", variant = quoted(&v.name),);
             for (i, f) in fields.iter().enumerate() {
                 let last = i + 1 == fields.len();
                 let ty = type_map::render_type(&f.ty, tm_opts);
@@ -372,11 +386,7 @@ fn write_procedure_kinds(out: &mut String, ir: &Ir) {
             taut_rpc::ir::ProcKind::Mutation => "\"mutation\"",
             taut_rpc::ir::ProcKind::Subscription => "\"subscription\"",
         };
-        let _ = writeln!(
-            out,
-            "  {key}: {kind_lit},",
-            key = quoted(&p.name),
-        );
+        let _ = writeln!(out, "  {key}: {kind_lit},", key = quoted(&p.name),);
     }
     out.push_str(
         "} as const satisfies Record<keyof Procedures, \"query\" | \"mutation\" | \"subscription\">;\n\n",
@@ -386,17 +396,545 @@ fn write_procedure_kinds(out: &mut String, ir: &Ir) {
 fn write_create_api(out: &mut String) {
     out.push_str("/** Construct a typed client for the procedures generated above. */\n");
     out.push_str("export function createApi(opts: ClientOptions): ClientOf<Procedures> {\n");
-    out.push_str("  return createClient<Procedures>({ ...opts, kinds: opts.kinds ?? procedureKinds });\n");
+    out.push_str(
+        "  return createClient<Procedures>({ ...opts, kinds: opts.kinds ?? procedureKinds });\n",
+    );
     out.push_str("}\n");
 }
 
-fn write_validator_stub(out: &mut String, v: Validator) {
-    if matches!(v, Validator::None) {
+// ---------------------------------------------------------------------------
+// Phase 4: validator schema emission
+// ---------------------------------------------------------------------------
+
+/// Emit `<Name>Schema` consts for every TypeDef. Skipped entirely when the
+/// validator is `None`.
+fn write_schemas(out: &mut String, ir: &Ir, validator: Validator, tm_opts: &type_map::Options) {
+    if matches!(validator, Validator::None) || ir.types.is_empty() {
         return;
     }
+
+    // Re-run the same dedup pass `write_types` uses so that schemas appear in
+    // the same order as the interfaces they mirror, and duplicates collapse
+    // identically. Conflicts have already been surfaced upstream.
+    let mut seen: BTreeMap<&str, &TypeDef> = BTreeMap::new();
+    let mut order: Vec<&TypeDef> = Vec::new();
+    for t in &ir.types {
+        if seen.insert(t.name.as_str(), t).is_none() {
+            order.push(t);
+        }
+    }
+
+    out.push_str("// ---- validator schemas ----\n\n");
+    for t in order {
+        write_type_schema(out, t, validator, tm_opts);
+    }
+}
+
+fn write_type_schema(
+    out: &mut String,
+    t: &TypeDef,
+    validator: Validator,
+    tm_opts: &type_map::Options,
+) {
+    let name = &t.name;
+    let body = match &t.shape {
+        TypeShape::Struct(fields) => render_struct_schema(fields, validator, tm_opts),
+        TypeShape::Enum(e) => render_enum_schema(e, validator, tm_opts),
+        TypeShape::Tuple(elems) => render_tuple_schema(elems, validator, tm_opts),
+        TypeShape::Newtype(inner) | TypeShape::Alias(inner) => {
+            render_schema(inner, validator, tm_opts)
+        }
+    };
+    let _ = writeln!(out, "export const {name}Schema = {body};\n");
+}
+
+/// Build the `v.object({ ... })` / `z.object({ ... })` schema body for a
+/// struct's fields, applying any per-field constraints.
+fn render_struct_schema(
+    fields: &[Field],
+    validator: Validator,
+    tm_opts: &type_map::Options,
+) -> String {
+    let prefix = ns(validator);
+    if fields.is_empty() {
+        return format!("{prefix}.object({{}})");
+    }
+    let mut out = String::new();
+    out.push_str(prefix);
+    out.push_str(".object({\n");
+    for f in fields {
+        let expr = render_field_schema(f, validator, tm_opts);
+        let _ = writeln!(out, "  {name}: {expr},", name = f.name);
+    }
+    out.push_str("})");
+    out
+}
+
+/// Render the schema for an enum (discriminated union).
+///
+/// Each variant becomes a `v.object` / `z.object` carrying a literal `tag`
+/// field plus the variant's payload (if any). The variants are unioned via
+/// `v.variant(tag, [...])` for Valibot or `z.discriminatedUnion(tag, [...])`
+/// for Zod, matching the TS-side discriminant convention.
+fn render_enum_schema(e: &EnumDef, validator: Validator, tm_opts: &type_map::Options) -> String {
+    let prefix = ns(validator);
+    if e.variants.is_empty() {
+        // Uninhabited: emit a never-shaped schema. Both libraries accept
+        // a zero-element union via their respective primitives.
+        return match validator {
+            Validator::Valibot => format!("{prefix}.never()"),
+            Validator::Zod => format!("{prefix}.never()"),
+            Validator::None => unreachable!(),
+        };
+    }
+    let mut variant_exprs: Vec<String> = Vec::with_capacity(e.variants.len());
+    for v in &e.variants {
+        variant_exprs.push(render_variant_schema(&e.tag, v, validator, tm_opts));
+    }
+    match validator {
+        Validator::Valibot => {
+            let tag_lit = quoted(&e.tag);
+            let joined = variant_exprs.join(", ");
+            format!("{prefix}.variant({tag_lit}, [{joined}])")
+        }
+        Validator::Zod => {
+            let tag_lit = quoted(&e.tag);
+            let joined = variant_exprs.join(", ");
+            format!("{prefix}.discriminatedUnion({tag_lit}, [{joined}])")
+        }
+        Validator::None => unreachable!(),
+    }
+}
+
+fn render_variant_schema(
+    tag: &str,
+    v: &Variant,
+    validator: Validator,
+    tm_opts: &type_map::Options,
+) -> String {
+    let prefix = ns(validator);
+    let tag_field = match validator {
+        Validator::Valibot => format!("{prefix}.literal({})", quoted(&v.name)),
+        Validator::Zod => format!("{prefix}.literal({})", quoted(&v.name)),
+        Validator::None => unreachable!(),
+    };
+    match &v.payload {
+        VariantPayload::Unit => {
+            format!("{prefix}.object({{ {tag}: {tag_field} }})")
+        }
+        VariantPayload::Tuple(elems) => {
+            if elems.is_empty() {
+                return format!("{prefix}.object({{ {tag}: {tag_field} }})");
+            }
+            let inner: Vec<String> = elems
+                .iter()
+                .map(|e| render_schema(e, validator, tm_opts))
+                .collect();
+            let payload = format!("{prefix}.tuple([{}])", inner.join(", "));
+            format!("{prefix}.object({{ {tag}: {tag_field}, payload: {payload} }})")
+        }
+        VariantPayload::Struct(fields) => {
+            if fields.is_empty() {
+                return format!("{prefix}.object({{ {tag}: {tag_field} }})");
+            }
+            let mut s = String::new();
+            s.push_str(prefix);
+            s.push_str(".object({ ");
+            let _ = write!(s, "{tag}: {tag_field}");
+            for f in fields {
+                let expr = render_field_schema(f, validator, tm_opts);
+                let _ = write!(s, ", {name}: {expr}", name = f.name);
+            }
+            s.push_str(" })");
+            s
+        }
+    }
+}
+
+/// Render a tuple-shaped TypeDef's schema: `v.tuple([...])` / `z.tuple([...])`.
+fn render_tuple_schema(
+    elems: &[TypeRef],
+    validator: Validator,
+    tm_opts: &type_map::Options,
+) -> String {
+    let prefix = ns(validator);
+    if elems.is_empty() {
+        // The TS rendering for `()` is `void`. Match that here with `null()`
+        // (Valibot) / `null()` (Zod) — the chosen wire shape for `()`.
+        return format!("{prefix}.null()");
+    }
+    let inner: Vec<String> = elems
+        .iter()
+        .map(|t| render_schema(t, validator, tm_opts))
+        .collect();
+    format!("{prefix}.tuple([{}])", inner.join(", "))
+}
+
+/// Render the schema expression for a [`TypeRef`].
+fn render_schema(t: &TypeRef, validator: Validator, tm_opts: &type_map::Options) -> String {
+    match t {
+        TypeRef::Primitive(p) => render_primitive_schema(*p, validator, tm_opts),
+        TypeRef::Named(name) => format!("{name}Schema"),
+        TypeRef::Option(inner) => {
+            let inner_expr = render_schema(inner, validator, tm_opts);
+            let prefix = ns(validator);
+            // Both libraries accept "null or T". Use `nullable` (Valibot) or
+            // `nullable()` chained on Zod schemas to mirror SPEC §3.1's
+            // `T | null` mapping.
+            match validator {
+                Validator::Valibot => format!("{prefix}.nullable({inner_expr})"),
+                Validator::Zod => format!("{inner_expr}.nullable()"),
+                Validator::None => unreachable!(),
+            }
+        }
+        TypeRef::Vec(inner) => {
+            let inner_expr = render_schema(inner, validator, tm_opts);
+            let prefix = ns(validator);
+            format!("{prefix}.array({inner_expr})")
+        }
+        TypeRef::Map { key, value } => {
+            let v_expr = render_schema(value, validator, tm_opts);
+            let prefix = ns(validator);
+            // SPEC §3.1: string-keyed maps render as `Record<string, V>`. For
+            // non-string keys both libraries lack a great primitive — fall
+            // back to `array(tuple([k, v]))`.
+            if is_string_keyed(key) {
+                match validator {
+                    Validator::Valibot => {
+                        format!("{prefix}.record({prefix}.string(), {v_expr})")
+                    }
+                    Validator::Zod => {
+                        format!("{prefix}.record({prefix}.string(), {v_expr})")
+                    }
+                    Validator::None => unreachable!(),
+                }
+            } else {
+                let k_expr = render_schema(key, validator, tm_opts);
+                format!("{prefix}.array({prefix}.tuple([{k_expr}, {v_expr}]))")
+            }
+        }
+        TypeRef::Tuple(elems) => render_tuple_schema(elems, validator, tm_opts),
+        TypeRef::FixedArray { elem, len } => {
+            let elem_expr = render_schema(elem, validator, tm_opts);
+            let prefix = ns(validator);
+            // Mirror `type_map::render_fixed_array`: fold into an N-element
+            // tuple. We don't apply the 16-element cap here because schemas
+            // get reused at runtime — but to match the TS type's shape, we
+            // also stay tuple-shaped for any length.
+            let parts: Vec<String> = (0..*len).map(|_| elem_expr.clone()).collect();
+            format!("{prefix}.tuple([{}])", parts.join(", "))
+        }
+    }
+}
+
+/// Render the schema for a single struct field, applying any constraints.
+///
+/// Constraints are applied as a `v.pipe(<base>, <check1>, <check2>, ...)` for
+/// Valibot, or as chained `.method()` calls for Zod. If no constraints are
+/// present we emit just the base expression. `Option<T>` fields are wrapped
+/// in `nullable` _around_ the constrained inner expression so the constraint
+/// only applies when the value is present.
+fn render_field_schema(f: &Field, validator: Validator, tm_opts: &type_map::Options) -> String {
+    // Strip a top-level Option to apply constraints to the inner type, then
+    // re-wrap. This matches the SPEC §7 intent that constraints describe the
+    // shape of the present value.
+    let (inner_ty, is_option) = match &f.ty {
+        TypeRef::Option(inner) => (inner.as_ref(), true),
+        _ => (&f.ty, false),
+    };
+
+    let base = render_schema(inner_ty, validator, tm_opts);
+
+    let with_constraints = if f.constraints.is_empty() {
+        base
+    } else {
+        match validator {
+            Validator::Valibot => apply_valibot_constraints(&base, inner_ty, &f.constraints),
+            Validator::Zod => apply_zod_constraints(&base, inner_ty, &f.constraints),
+            Validator::None => unreachable!(),
+        }
+    };
+
+    if is_option {
+        let prefix = ns(validator);
+        match validator {
+            Validator::Valibot => format!("{prefix}.nullable({with_constraints})"),
+            Validator::Zod => format!("{with_constraints}.nullable()"),
+            Validator::None => unreachable!(),
+        }
+    } else {
+        with_constraints
+    }
+}
+
+/// Wrap `base` with `v.pipe(base, <check>, <check>, ...)` for the given
+/// constraints. If the list contains nothing renderable (e.g. only `Custom`
+/// tags) we just return `base` with the breadcrumb comments inline.
+fn apply_valibot_constraints(base: &str, inner_ty: &TypeRef, constraints: &[Constraint]) -> String {
+    let mut checks: Vec<String> = Vec::new();
+    let mut comments: Vec<String> = Vec::new();
+    for c in constraints {
+        match c {
+            Constraint::Min(n) => {
+                if is_string_typed(inner_ty) {
+                    // SPEC §7: min/max are numeric only. Length on strings is
+                    // expressed via `Constraint::Length`. If we see Min on a
+                    // string field we leave a comment rather than silently
+                    // pretending it's a length check.
+                    comments.push("/* min on string ignored — use length */".to_string());
+                } else {
+                    checks.push(format!("v.minValue({})", render_number(*n)));
+                }
+            }
+            Constraint::Max(n) => {
+                if is_string_typed(inner_ty) {
+                    comments.push("/* max on string ignored — use length */".to_string());
+                } else {
+                    checks.push(format!("v.maxValue({})", render_number(*n)));
+                }
+            }
+            Constraint::Length { min, max } => {
+                if let Some(n) = min {
+                    checks.push(format!("v.minLength({n})"));
+                }
+                if let Some(n) = max {
+                    checks.push(format!("v.maxLength({n})"));
+                }
+            }
+            Constraint::Pattern(re) => {
+                checks.push(format!("v.regex({})", regex_literal(re)));
+            }
+            Constraint::Email => checks.push("v.email()".to_string()),
+            Constraint::Url => checks.push("v.url()".to_string()),
+            Constraint::Custom(name) => {
+                comments.push(format!("/* custom:{name} — supply your own check */"));
+            }
+        }
+    }
+    if checks.is_empty() {
+        if comments.is_empty() {
+            base.to_string()
+        } else {
+            format!("{} {}", base, comments.join(" "))
+        }
+    } else {
+        let trail = if comments.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", comments.join(" "))
+        };
+        format!("v.pipe({}, {}){}", base, checks.join(", "), trail)
+    }
+}
+
+/// Chain Zod constraints onto `base`. Zod expresses checks as
+/// `.min(n).max(n).email().url().regex(/.../)` rather than via a separate
+/// `pipe` combinator.
+fn apply_zod_constraints(base: &str, inner_ty: &TypeRef, constraints: &[Constraint]) -> String {
+    let mut chain = String::from(base);
+    let mut comments: Vec<String> = Vec::new();
+    for c in constraints {
+        match c {
+            Constraint::Min(n) => {
+                if is_string_typed(inner_ty) {
+                    comments.push("/* min on string ignored — use length */".to_string());
+                } else {
+                    let _ = write!(chain, ".min({})", render_number(*n));
+                }
+            }
+            Constraint::Max(n) => {
+                if is_string_typed(inner_ty) {
+                    comments.push("/* max on string ignored — use length */".to_string());
+                } else {
+                    let _ = write!(chain, ".max({})", render_number(*n));
+                }
+            }
+            Constraint::Length { min, max } => {
+                if let Some(n) = min {
+                    let _ = write!(chain, ".min({n})");
+                }
+                if let Some(n) = max {
+                    let _ = write!(chain, ".max({n})");
+                }
+            }
+            Constraint::Pattern(re) => {
+                let _ = write!(chain, ".regex({})", regex_literal(re));
+            }
+            Constraint::Email => chain.push_str(".email()"),
+            Constraint::Url => chain.push_str(".url()"),
+            Constraint::Custom(name) => {
+                comments.push(format!("/* custom:{name} — supply your own check */"));
+            }
+        }
+    }
+    if comments.is_empty() {
+        chain
+    } else {
+        format!("{chain} {}", comments.join(" "))
+    }
+}
+
+fn render_primitive_schema(
+    p: Primitive,
+    validator: Validator,
+    tm_opts: &type_map::Options,
+) -> String {
+    let prefix = ns(validator);
+    use Primitive::*;
+    let suffix = match p {
+        Bool => "boolean()",
+        U8 | U16 | U32 | I8 | I16 | I32 | F32 | F64 => "number()",
+        U64 | I64 | U128 | I128 => match tm_opts.bigint {
+            BigIntStrategy::Native => "bigint()",
+            BigIntStrategy::AsString => "string()",
+        },
+        String => "string()",
+        // SPEC §3.1: bytes go on the wire as base64.
+        Bytes => "string()",
+        Unit => "null()",
+        DateTime => "string()",
+        Uuid => "string()",
+    };
+    format!("{prefix}.{suffix}")
+}
+
+fn ns(validator: Validator) -> &'static str {
+    match validator {
+        Validator::Valibot => "v",
+        Validator::Zod => "z",
+        Validator::None => "",
+    }
+}
+
+fn is_string_typed(t: &TypeRef) -> bool {
+    matches!(
+        t,
+        TypeRef::Primitive(
+            Primitive::String | Primitive::Bytes | Primitive::DateTime | Primitive::Uuid,
+        )
+    )
+}
+
+/// A "string-keyed" map (mirrors `type_map`'s rule). String, DateTime, and
+/// Uuid all serialise as strings.
+fn is_string_keyed(key: &TypeRef) -> bool {
+    matches!(
+        key,
+        TypeRef::Primitive(Primitive::String | Primitive::DateTime | Primitive::Uuid,)
+    )
+}
+
+/// Render an `f64` constraint bound back into TS source. Whole numbers come
+/// out without a decimal point so that `Min(0.0)` reads as `0`, not `0.0`.
+fn render_number(n: f64) -> String {
+    if n.is_finite() && n.fract() == 0.0 && n.abs() < 1e16 {
+        format!("{}", n as i64)
+    } else {
+        // Default float rendering. We keep this minimal; Rust's default `{}`
+        // for f64 already drops trailing zeros after the decimal.
+        format!("{n}")
+    }
+}
+
+/// Render a Rust regex source as a TS regex literal. We escape `/` so the
+/// pattern doesn't accidentally close the literal early. Backslashes and
+/// other escapes are passed through verbatim (the regex engine on the JS
+/// side handles them).
+fn regex_literal(re: &str) -> String {
+    let mut out = String::with_capacity(re.len() + 2);
+    out.push('/');
+    for ch in re.chars() {
+        if ch == '/' {
+            out.push_str("\\/");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('/');
+    out
+}
+
+/// Emit per-procedure schema constants and the `procedureSchemas` runtime
+/// map. Skipped entirely when the validator is `None`.
+fn write_procedure_schemas(
+    out: &mut String,
+    ir: &Ir,
+    validator: Validator,
+    tm_opts: &type_map::Options,
+) {
+    if matches!(validator, Validator::None) {
+        return;
+    }
+
+    // Collect every TypeDef name we know about so we can decide whether a
+    // procedure's input/output names can simply alias an existing
+    // `<Name>Schema` (yes for Named that's defined here; no for Named that's
+    // external — fall back to inline schema rendering).
+    let known: BTreeSet<&str> = ir.types.iter().map(|t| t.name.as_str()).collect();
+
+    out.push_str("// ---- procedure schemas ----\n\n");
+
+    // Wrap raw schemas in a uniform `{ parse(value) }` shape so the runtime can
+    // call them the same way regardless of the validator library. Valibot's
+    // top-level API is `v.parse(schema, value)` (no `.parse` method on the
+    // schema itself); Zod schemas already have `.parse(value)`. We normalise
+    // by emitting a thin adapter per procedure.
+    let (schema_ty, parse_call) = match validator {
+        Validator::Valibot => (
+            "v.BaseSchema<unknown, unknown, v.BaseIssue<unknown>>",
+            "v.parse(schema, value)",
+        ),
+        Validator::Zod => ("z.ZodTypeAny", "schema.parse(value)"),
+        Validator::None => unreachable!("guarded above"),
+    };
+    let _ = writeln!(
+        out,
+        "function __taut_wrap(schema: {schema_ty}): {{ parse(value: unknown): unknown }} {{",
+    );
+    let _ = writeln!(out, "  return {{ parse: (value: unknown) => {parse_call} }};");
+    out.push_str("}\n\n");
+
+    for p in &ir.procedures {
+        let alias = procedure_alias_name(&p.name);
+        let input_expr = procedure_io_schema(&p.input, validator, tm_opts, &known);
+        let output_expr = procedure_io_schema(&p.output, validator, tm_opts, &known);
+        let _ = writeln!(out, "export const {alias}_inputSchema = {input_expr};");
+        let _ = writeln!(out, "export const {alias}_outputSchema = {output_expr};");
+    }
     out.push('\n');
-    out.push_str("// TODO: validator schemas (Phase 4)\n");
-    let _ = writeln!(out, "// (configured validator: {v:?})");
+
+    out.push_str("/** Procedure name -> { input, output } schema, for runtime validation. */\n");
+    out.push_str("export const procedureSchemas = {\n");
+    for p in &ir.procedures {
+        let alias = procedure_alias_name(&p.name);
+        let _ = writeln!(
+            out,
+            "  {key}: {{ input: __taut_wrap({alias}_inputSchema), output: __taut_wrap({alias}_outputSchema) }},",
+            key = quoted(&p.name),
+        );
+    }
+    out.push_str("};\n\n");
+}
+
+/// Pick the right schema expression for a procedure's input or output type:
+/// alias an existing TypeDef schema by name when possible, otherwise fall
+/// back to an inline schema expression.
+fn procedure_io_schema(
+    t: &TypeRef,
+    validator: Validator,
+    tm_opts: &type_map::Options,
+    known: &BTreeSet<&str>,
+) -> String {
+    if let TypeRef::Named(name) = t {
+        if known.contains(name.as_str()) {
+            return format!("{name}Schema");
+        }
+        // Unknown Named — defer to whatever the user has in scope. We still
+        // emit `<Name>Schema` so a hand-supplied schema can satisfy the
+        // reference at TS compile time.
+        return format!("{name}Schema");
+    }
+    render_schema(t, validator, tm_opts)
 }
 
 // ---------------------------------------------------------------------------
@@ -471,8 +1009,8 @@ fn write_doc_comment(out: &mut String, doc: &str, indent: &str) {
 mod tests {
     use super::*;
     use taut_rpc::ir::{
-        EnumDef, Field, HttpMethod, Ir, Primitive, ProcKind, Procedure, TypeDef, TypeRef,
-        TypeShape, Variant, VariantPayload,
+        Constraint, EnumDef, Field, HttpMethod, Ir, Primitive, ProcKind, Procedure, TypeDef,
+        TypeRef, TypeShape, Variant, VariantPayload,
     };
 
     fn opts() -> CodegenOptions {
@@ -496,7 +1034,9 @@ mod tests {
             "type-only import missing:\n{s}"
         );
         assert!(
-            s.contains("import { createClient, type ClientOptions, type ClientOf } from \"taut-rpc\";"),
+            s.contains(
+                "import { createClient, type ClientOptions, type ClientOf } from \"taut-rpc\";"
+            ),
             "value import missing:\n{s}"
         );
         assert!(
@@ -512,7 +1052,9 @@ mod tests {
             "createApi missing:\n{s}"
         );
         assert!(
-            s.contains("createClient<Procedures>({ ...opts, kinds: opts.kinds ?? procedureKinds });"),
+            s.contains(
+                "createClient<Procedures>({ ...opts, kinds: opts.kinds ?? procedureKinds });"
+            ),
             "createApi should thread procedureKinds through to createClient:\n{s}"
         );
     }
@@ -576,6 +1118,7 @@ mod tests {
                         optional: false,
                         undefined: false,
                         doc: None,
+                        constraints: vec![],
                     },
                     // optional
                     Field {
@@ -584,6 +1127,7 @@ mod tests {
                         optional: true,
                         undefined: false,
                         doc: None,
+                        constraints: vec![],
                     },
                     // undefined-flavored
                     Field {
@@ -592,6 +1136,7 @@ mod tests {
                         optional: false,
                         undefined: true,
                         doc: None,
+                        constraints: vec![],
                     },
                     // both
                     Field {
@@ -600,6 +1145,7 @@ mod tests {
                         optional: true,
                         undefined: true,
                         doc: None,
+                        constraints: vec![],
                     },
                 ]),
             }],
@@ -648,6 +1194,7 @@ mod tests {
                                     optional: false,
                                     undefined: false,
                                     doc: None,
+                                    constraints: vec![],
                                 },
                                 Field {
                                     name: "y".to_string(),
@@ -655,6 +1202,7 @@ mod tests {
                                     optional: false,
                                     undefined: false,
                                     doc: None,
+                                    constraints: vec![],
                                 },
                             ]),
                         },
@@ -664,10 +1212,7 @@ mod tests {
         };
         let s = render_ts(&ir, &opts_no_validator());
         assert!(s.contains("export type Event ="), "header missing:\n{s}");
-        assert!(
-            s.contains("{ type: \"Ping\" }"),
-            "unit variant wrong:\n{s}"
-        );
+        assert!(s.contains("{ type: \"Ping\" }"), "unit variant wrong:\n{s}");
         assert!(
             s.contains("{ type: \"Message\", payload: [string] }"),
             "tuple variant wrong:\n{s}"
@@ -788,17 +1333,15 @@ mod tests {
             "per-procedure error alias missing:\n{s}"
         );
         assert!(
-            s.contains("export type Proc_p = ProcedureDef<void, void, Proc_p_Error, \"mutation\">;"),
+            s.contains(
+                "export type Proc_p = ProcedureDef<void, void, Proc_p_Error, \"mutation\">;"
+            ),
             "ProcedureDef should reference Proc_p_Error alias:\n{s}"
         );
         // Sanity: the alias must appear *before* the ProcedureDef so TS
         // resolves the forward reference cleanly.
-        let alias_idx = s
-            .find("export type Proc_p_Error =")
-            .expect("alias present");
-        let def_idx = s
-            .find("export type Proc_p =")
-            .expect("def present");
+        let alias_idx = s.find("export type Proc_p_Error =").expect("alias present");
+        let def_idx = s.find("export type Proc_p =").expect("def present");
         assert!(alias_idx < def_idx, "alias must precede ProcedureDef:\n{s}");
         // procedureKinds reflects the mutation kind for runtime dispatch.
         assert!(
@@ -828,7 +1371,9 @@ mod tests {
             "single-error alias missing:\n{s}"
         );
         assert!(
-            s.contains("export type Proc_add = ProcedureDef<void, number, Proc_add_Error, \"query\">;"),
+            s.contains(
+                "export type Proc_add = ProcedureDef<void, number, Proc_add_Error, \"query\">;"
+            ),
             "ProcedureDef must reference single-error alias:\n{s}"
         );
         // Doc comment on the alias mentions narrowing.
@@ -864,7 +1409,10 @@ mod tests {
             ),
             "dotted-name ProcedureDef wrong:\n{s}"
         );
-        assert_eq!(procedure_error_alias_name("users.get"), "Proc_users_get_Error");
+        assert_eq!(
+            procedure_error_alias_name("users.get"),
+            "Proc_users_get_Error"
+        );
     }
 
     #[test]
@@ -963,30 +1511,426 @@ mod tests {
         let jsdoc_idx = s
             .find("Subscription procedure — call via")
             .expect("jsdoc present");
-        let alias_idx = s
-            .find("export type Proc_ticker =")
-            .expect("alias present");
+        let alias_idx = s.find("export type Proc_ticker =").expect("alias present");
         assert!(
             jsdoc_idx < alias_idx,
             "JSDoc must precede the type alias:\n{s}"
         );
     }
 
+    // ---------------------------------------------------------------------
+    // Phase 4: validator schema emission
+    // ---------------------------------------------------------------------
+
+    fn opts_zod() -> CodegenOptions {
+        CodegenOptions {
+            validator: Validator::Zod,
+            ..CodegenOptions::default()
+        }
+    }
+
+    /// Build a one-struct IR named `User` with the supplied fields.
+    fn one_struct_ir(name: &str, fields: Vec<Field>) -> Ir {
+        Ir {
+            ir_version: Ir::CURRENT_VERSION,
+            procedures: vec![],
+            types: vec![TypeDef {
+                name: name.to_string(),
+                doc: None,
+                shape: TypeShape::Struct(fields),
+            }],
+        }
+    }
+
+    fn plain_field(name: &str, ty: TypeRef, constraints: Vec<Constraint>) -> Field {
+        Field {
+            name: name.to_string(),
+            ty,
+            optional: false,
+            undefined: false,
+            doc: None,
+            constraints,
+        }
+    }
+
     #[test]
-    fn validator_stub_present_when_not_none() {
-        let s = render_ts(&Ir::empty(), &opts());
+    fn valibot_emits_schema_for_simple_struct() {
+        let ir = one_struct_ir(
+            "User",
+            vec![
+                plain_field("id", TypeRef::Primitive(Primitive::U64), vec![]),
+                plain_field("name", TypeRef::Primitive(Primitive::String), vec![]),
+            ],
+        );
+        let s = render_ts(&ir, &opts());
         assert!(
-            s.contains("TODO: validator schemas (Phase 4)"),
-            "stub missing:\n{s}"
+            s.contains("import * as v from \"valibot\";"),
+            "valibot import missing:\n{s}"
+        );
+        assert!(
+            s.contains("export const UserSchema = v.object({"),
+            "UserSchema header missing:\n{s}"
+        );
+        // Phase 4 keeps the existing TS interface alongside the schema.
+        assert!(
+            s.contains("export interface User {"),
+            "interface should still be emitted:\n{s}"
+        );
+        assert!(s.contains("id: v.bigint()"), "id field schema wrong:\n{s}");
+        assert!(
+            s.contains("name: v.string()"),
+            "name field schema wrong:\n{s}"
         );
     }
 
     #[test]
-    fn validator_stub_absent_when_none() {
-        let s = render_ts(&Ir::empty(), &opts_no_validator());
+    fn valibot_applies_email_constraint_to_string_field() {
+        let ir = one_struct_ir(
+            "User",
+            vec![plain_field(
+                "email",
+                TypeRef::Primitive(Primitive::String),
+                vec![Constraint::Email],
+            )],
+        );
+        let s = render_ts(&ir, &opts());
         assert!(
-            !s.contains("validator schemas (Phase 4)"),
-            "stub should be absent:\n{s}"
+            s.contains("email: v.pipe(v.string(), v.email())"),
+            "email constraint missing:\n{s}"
+        );
+    }
+
+    #[test]
+    fn valibot_applies_min_max_to_number_field() {
+        let ir = one_struct_ir(
+            "User",
+            vec![plain_field(
+                "score",
+                TypeRef::Primitive(Primitive::U32),
+                vec![Constraint::Min(0.0), Constraint::Max(100.0)],
+            )],
+        );
+        let s = render_ts(&ir, &opts());
+        assert!(
+            s.contains("score: v.pipe(v.number(), v.minValue(0), v.maxValue(100))"),
+            "min/max chain wrong:\n{s}"
+        );
+    }
+
+    #[test]
+    fn valibot_applies_length_to_string_field() {
+        let ir = one_struct_ir(
+            "User",
+            vec![plain_field(
+                "name",
+                TypeRef::Primitive(Primitive::String),
+                vec![Constraint::Length {
+                    min: Some(1),
+                    max: Some(64),
+                }],
+            )],
+        );
+        let s = render_ts(&ir, &opts());
+        assert!(
+            s.contains("name: v.pipe(v.string(), v.minLength(1), v.maxLength(64))"),
+            "length chain wrong:\n{s}"
+        );
+    }
+
+    #[test]
+    fn valibot_pattern_renders_regex_literal() {
+        let ir = one_struct_ir(
+            "User",
+            vec![plain_field(
+                "slug",
+                TypeRef::Primitive(Primitive::String),
+                vec![Constraint::Pattern(r"^[a-z]+$".to_string())],
+            )],
+        );
+        let s = render_ts(&ir, &opts());
+        assert!(
+            s.contains("slug: v.pipe(v.string(), v.regex(/^[a-z]+$/))"),
+            "regex literal wrong:\n{s}"
+        );
+    }
+
+    #[test]
+    fn valibot_custom_constraint_emits_breadcrumb_only() {
+        let ir = one_struct_ir(
+            "User",
+            vec![plain_field(
+                "secret",
+                TypeRef::Primitive(Primitive::String),
+                vec![Constraint::Custom("must_be_prime".to_string())],
+            )],
+        );
+        let s = render_ts(&ir, &opts());
+        assert!(
+            s.contains("custom:must_be_prime"),
+            "custom breadcrumb missing:\n{s}"
+        );
+        // No bogus check call should be generated for the custom predicate.
+        assert!(
+            !s.contains("v.must_be_prime"),
+            "custom must not become a validator call:\n{s}"
+        );
+    }
+
+    #[test]
+    fn valibot_emits_procedure_schemas_map() {
+        let ir = Ir {
+            ir_version: Ir::CURRENT_VERSION,
+            procedures: vec![
+                Procedure {
+                    name: "create_user".to_string(),
+                    kind: ProcKind::Mutation,
+                    input: TypeRef::Named("CreateUserInput".to_string()),
+                    output: TypeRef::Named("User".to_string()),
+                    errors: vec![],
+                    http_method: HttpMethod::Post,
+                    doc: None,
+                },
+                Procedure {
+                    name: "ping".to_string(),
+                    kind: ProcKind::Query,
+                    input: TypeRef::Primitive(Primitive::Unit),
+                    output: TypeRef::Primitive(Primitive::String),
+                    errors: vec![],
+                    http_method: HttpMethod::Post,
+                    doc: None,
+                },
+            ],
+            types: vec![
+                TypeDef {
+                    name: "CreateUserInput".to_string(),
+                    doc: None,
+                    shape: TypeShape::Struct(vec![plain_field(
+                        "name",
+                        TypeRef::Primitive(Primitive::String),
+                        vec![],
+                    )]),
+                },
+                TypeDef {
+                    name: "User".to_string(),
+                    doc: None,
+                    shape: TypeShape::Struct(vec![plain_field(
+                        "id",
+                        TypeRef::Primitive(Primitive::U64),
+                        vec![],
+                    )]),
+                },
+            ],
+        };
+        let s = render_ts(&ir, &opts());
+        // Per-procedure schema constants alias the TypeDef schema for Named
+        // types and inline the expression for primitives.
+        assert!(
+            s.contains("export const Proc_create_user_inputSchema = CreateUserInputSchema;"),
+            "input alias missing:\n{s}"
+        );
+        assert!(
+            s.contains("export const Proc_create_user_outputSchema = UserSchema;"),
+            "output alias missing:\n{s}"
+        );
+        assert!(
+            s.contains("export const Proc_ping_inputSchema = v.null();"),
+            "primitive input schema wrong:\n{s}"
+        );
+        assert!(
+            s.contains("export const Proc_ping_outputSchema = v.string();"),
+            "primitive output schema wrong:\n{s}"
+        );
+        // Runtime map.
+        assert!(
+            s.contains("export const procedureSchemas = {"),
+            "procedureSchemas header missing:\n{s}"
+        );
+        assert!(
+            s.contains(
+                "\"create_user\": { input: __taut_wrap(Proc_create_user_inputSchema), output: __taut_wrap(Proc_create_user_outputSchema) },"
+            ),
+            "create_user map entry wrong:\n{s}"
+        );
+        assert!(
+            s.contains(
+                "\"ping\": { input: __taut_wrap(Proc_ping_inputSchema), output: __taut_wrap(Proc_ping_outputSchema) },"
+            ),
+            "ping map entry wrong:\n{s}"
+        );
+    }
+
+    #[test]
+    fn zod_emits_z_namespace_import() {
+        let s = render_ts(&Ir::empty(), &opts_zod());
+        assert!(
+            s.contains("import { z } from \"zod\";"),
+            "zod import missing:\n{s}"
+        );
+        // valibot import must NOT appear when zod is selected.
+        assert!(
+            !s.contains("import * as v from \"valibot\";"),
+            "valibot import should be absent:\n{s}"
+        );
+    }
+
+    #[test]
+    fn zod_applies_email_chain() {
+        let ir = one_struct_ir(
+            "User",
+            vec![plain_field(
+                "email",
+                TypeRef::Primitive(Primitive::String),
+                vec![Constraint::Email],
+            )],
+        );
+        let s = render_ts(&ir, &opts_zod());
+        assert!(
+            s.contains("email: z.string().email()"),
+            "zod email chain wrong:\n{s}"
+        );
+    }
+
+    #[test]
+    fn zod_applies_min_max_chain() {
+        let ir = one_struct_ir(
+            "User",
+            vec![plain_field(
+                "age",
+                TypeRef::Primitive(Primitive::U8),
+                vec![Constraint::Min(0.0), Constraint::Max(120.0)],
+            )],
+        );
+        let s = render_ts(&ir, &opts_zod());
+        assert!(
+            s.contains("age: z.number().min(0).max(120)"),
+            "zod min/max chain wrong:\n{s}"
+        );
+    }
+
+    #[test]
+    fn none_validator_emits_no_schemas() {
+        let ir = one_struct_ir(
+            "User",
+            vec![plain_field(
+                "id",
+                TypeRef::Primitive(Primitive::U32),
+                vec![],
+            )],
+        );
+        let s = render_ts(&ir, &opts_no_validator());
+        // Existing types still emit.
+        assert!(
+            s.contains("export interface User {"),
+            "interface still emitted:\n{s}"
+        );
+        // No schema emission of any kind.
+        assert!(
+            !s.contains("UserSchema"),
+            "UserSchema must not appear:\n{s}"
+        );
+        assert!(
+            !s.contains("procedureSchemas"),
+            "procedureSchemas must not appear:\n{s}"
+        );
+        assert!(
+            !s.contains("import * as v from \"valibot\";"),
+            "valibot import must be absent:\n{s}"
+        );
+        assert!(
+            !s.contains("import { z } from \"zod\";"),
+            "zod import must be absent:\n{s}"
+        );
+    }
+
+    #[test]
+    fn valibot_named_type_references_named_schema() {
+        // Field of a Named type should reference `<Name>Schema`, not inline.
+        let ir = Ir {
+            ir_version: Ir::CURRENT_VERSION,
+            procedures: vec![],
+            types: vec![
+                TypeDef {
+                    name: "Address".to_string(),
+                    doc: None,
+                    shape: TypeShape::Struct(vec![plain_field(
+                        "city",
+                        TypeRef::Primitive(Primitive::String),
+                        vec![],
+                    )]),
+                },
+                TypeDef {
+                    name: "User".to_string(),
+                    doc: None,
+                    shape: TypeShape::Struct(vec![plain_field(
+                        "address",
+                        TypeRef::Named("Address".to_string()),
+                        vec![],
+                    )]),
+                },
+            ],
+        };
+        let s = render_ts(&ir, &opts());
+        assert!(
+            s.contains("address: AddressSchema"),
+            "Named ref should resolve to AddressSchema:\n{s}"
+        );
+    }
+
+    #[test]
+    fn valibot_optional_field_wraps_constraints_in_nullable() {
+        // Option<String> with email constraint should be `nullable(pipe(string, email))`.
+        let ir = one_struct_ir(
+            "User",
+            vec![Field {
+                name: "email".to_string(),
+                ty: TypeRef::Option(Box::new(TypeRef::Primitive(Primitive::String))),
+                optional: true,
+                undefined: false,
+                doc: None,
+                constraints: vec![Constraint::Email],
+            }],
+        );
+        let s = render_ts(&ir, &opts());
+        assert!(
+            s.contains("email: v.nullable(v.pipe(v.string(), v.email()))"),
+            "nullable+pipe composition wrong:\n{s}"
+        );
+    }
+
+    #[test]
+    fn valibot_vec_renders_array_schema() {
+        let ir = one_struct_ir(
+            "Page",
+            vec![plain_field(
+                "items",
+                TypeRef::Vec(Box::new(TypeRef::Primitive(Primitive::String))),
+                vec![],
+            )],
+        );
+        let s = render_ts(&ir, &opts());
+        assert!(
+            s.contains("items: v.array(v.string())"),
+            "array schema wrong:\n{s}"
+        );
+    }
+
+    #[test]
+    fn valibot_map_renders_record_schema() {
+        let ir = one_struct_ir(
+            "Map",
+            vec![plain_field(
+                "counts",
+                TypeRef::Map {
+                    key: Box::new(TypeRef::Primitive(Primitive::String)),
+                    value: Box::new(TypeRef::Primitive(Primitive::U32)),
+                },
+                vec![],
+            )],
+        );
+        let s = render_ts(&ir, &opts());
+        assert!(
+            s.contains("counts: v.record(v.string(), v.number())"),
+            "record schema wrong:\n{s}"
         );
     }
 }

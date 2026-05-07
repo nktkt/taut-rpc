@@ -331,7 +331,7 @@ mod tests {
     /// don't care about for a closure-dispatch test, but that we still need
     /// to construct a `ProcedureDescriptor`.
     fn dummy_procedure_ir(name: &str) -> crate::ir::Procedure {
-        use crate::ir::{HttpMethod, ProcKind, Primitive, TypeRef};
+        use crate::ir::{HttpMethod, Primitive, ProcKind, TypeRef};
         crate::ir::Procedure {
             name: name.to_string(),
             kind: ProcKind::Query,

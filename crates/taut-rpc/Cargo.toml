@@ -22,6 +22,7 @@ tracing.workspace = true
 async-trait.workspace = true
 http.workspace = true
 bytes.workspace = true
+regex.workspace = true
 taut-rpc-macros = { path = "../taut-rpc-macros", version = "0.0.0" }
 
 [features]

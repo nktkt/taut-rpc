@@ -23,7 +23,7 @@ async fn ping() -> String {
 
 // --- add ---------------------------------------------------------------------
 
-#[derive(Serialize, Deserialize, Type)]
+#[derive(Serialize, Deserialize, Type, taut_rpc::Validate)]
 pub struct AddInput {
     pub a: i32,
     pub b: i32,
@@ -45,7 +45,7 @@ async fn add(input: AddInput) -> Result<i32, AddError> {
 
 // --- get_user ----------------------------------------------------------------
 
-#[derive(Serialize, Deserialize, Type)]
+#[derive(Serialize, Deserialize, Type, taut_rpc::Validate)]
 pub struct GetUserInput {
     pub id: u64,
 }

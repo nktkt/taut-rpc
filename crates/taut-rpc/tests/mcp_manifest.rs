@@ -49,6 +49,7 @@ fn hand_built_ir_round_trips_through_manifest_shape() {
                     optional: false,
                     undefined: false,
                     doc: None,
+                    constraints: vec![],
                 }]),
             },
         ],
@@ -86,7 +87,7 @@ fn hand_built_ir_round_trips_through_manifest_shape() {
 // Live macro pipeline
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize, Deserialize, Type)]
+#[derive(Serialize, Deserialize, Type, taut_rpc::Validate)]
 pub struct AddInput {
     /// Left operand.
     pub a: i32,

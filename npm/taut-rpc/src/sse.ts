@@ -19,6 +19,14 @@
  * which makes it unsuitable for authenticated requests (Bearer tokens, CSRF
  * headers, etc.). The fetch-based reader gives us full control over the
  * request, at the cost of having to parse the SSE framing ourselves.
+ *
+ * Validation hook (SPEC §7): per-frame output validation is intentionally
+ * NOT performed here. `createClient`'s proxy wraps the `AsyncIterable`
+ * returned from `subscribe()` with a validating iterator (one `schema.parse()`
+ * per yielded value) when `opts.schemas[name].output` is set and
+ * `opts.validate.recv !== false`. Keeping this concern in the proxy lets
+ * custom transport implementations stay simple and stateless — they only
+ * need to deliver decoded frames; the proxy decides whether to validate.
  */
 
 import type { ProcedureKind, Transport } from "./index.js";

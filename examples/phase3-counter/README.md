@@ -33,6 +33,14 @@ All input types use `#[derive(serde::Serialize, serde::Deserialize,
 taut_rpc::Type)]`. The wire format is SPEC §4.2 SSE
 (`event: data\ndata: <json>\n\n` per item, then `event: end\ndata:\n\n`).
 
+The Phase 4 update adds `taut_rpc::Validate` to `TicksInput` with `count` in
+`1..=100` and `interval_ms` in `10..=60_000`. The server now rejects
+out-of-range inputs before opening the stream — e.g. `count=10000` is
+refused with `validation_error`, never produces a partial sequence, and
+surfaces on the client as a `TautError` with `e.code === "validation_error"`.
+The client demonstrates this by attempting `count: 200n` after the happy
+path and printing the caught code.
+
 ## Run the server
 
 The example is outside the workspace, so the usual `cargo run -p
@@ -103,6 +111,7 @@ server_time:
   t: 2026-05-06T12:34:56Z
   t: 2026-05-06T12:34:57Z
   t: 2026-05-06T12:34:58Z
+rejected (count=200): validation_error
 done
 ```
 

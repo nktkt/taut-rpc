@@ -162,9 +162,15 @@ fn render_fixed_array(elem: &TypeRef, len: usize, opts: &Options) -> String {
     // Fallback: too long for a tuple. Keep it as an array and leave a
     // breadcrumb in the rendered output so reviewers notice.
     if needs_parens_for_array(elem) {
-        format!("/* TODO: fixed-size [{}; {}] */ ({})[]", rendered, len, rendered)
+        format!(
+            "/* TODO: fixed-size [{}; {}] */ ({})[]",
+            rendered, len, rendered
+        )
     } else {
-        format!("/* TODO: fixed-size [{}; {}] */ {}[]", rendered, len, rendered)
+        format!(
+            "/* TODO: fixed-size [{}; {}] */ {}[]",
+            rendered, len, rendered
+        )
     }
 }
 

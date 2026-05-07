@@ -37,10 +37,11 @@ proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full", "extra-traits"] }
 clap = { version = "4", features = ["derive"] }
+regex = "1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
-unused = "warn"
+unused = { level = "warn", priority = -1 }
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }

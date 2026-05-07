@@ -1,0 +1,5 @@
+error[E0599]: no method named `as_str` found for type `u32` in the current scope
+ --> tests/ui/validate-pattern-not-string-fail.rs:3:12
+  |
+3 | struct X { #[taut(pattern = "^[a-z]+$")] age: u32 }
+  |            ^ method not found in `u32`

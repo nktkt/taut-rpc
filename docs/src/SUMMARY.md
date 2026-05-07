@@ -14,9 +14,11 @@
 - [Getting started](./guides/getting-started.md)
 - [Authentication](./guides/auth.md)
 - [Middleware](./guides/middleware.md)
+- [Validation](./guides/validation.md)
 - [Subscriptions](./guides/subscriptions.md)
 
 # Reference
+- [Constraints](./reference/constraints.md)
 - [SPEC.md](./reference/spec.md)
 - [ROADMAP.md](./reference/roadmap.md)
 - [Changelog](./reference/changelog.md)

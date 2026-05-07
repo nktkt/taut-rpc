@@ -12,7 +12,7 @@
 //! and a plain unary `ping()` for sanity.
 
 use serde::{Deserialize, Serialize};
-use taut_rpc::{dump_if_requested, rpc, Router, Type};
+use taut_rpc::{dump_if_requested, rpc, Router, Type, Validate};
 use tower_http::cors::CorsLayer;
 
 // --- ping --------------------------------------------------------------------
@@ -30,13 +30,22 @@ async fn ping() -> &'static str {
 /// is the gap between them. A separate input struct rather than two scalar
 /// args because v0.1's `#[rpc]` accepts 0 or 1 input — multi-arg forms are
 /// expressed as a struct.
-#[derive(Serialize, Deserialize, Type)]
+///
+/// Phase 4 adds `taut_rpc::Validate` with bounds: `count` is capped at 100
+/// to keep an accidental misuse from looking like an infinite stream, and
+/// `interval_ms` is constrained to `[10, 60_000]` so neither a tight loop
+/// (1ms) nor an unbounded gap (hours) slips through. Out-of-range inputs
+/// are rejected on the server with `validation_error` before the stream
+/// is started, so the client never sees a partial sequence.
+#[derive(Serialize, Deserialize, Type, Validate)]
 pub struct TicksInput {
     /// How many values to emit (`0..count`). Defaults to 5 in the demo
     /// client; codegen surfaces this as `bigint` since u64 maps to bigint
     /// per SPEC §3.1.
+    #[taut(min = 1, max = 100)]
     pub count: u64,
     /// Milliseconds to wait between values. Defaults to 1000 in the demo.
+    #[taut(min = 10, max = 60_000)]
     pub interval_ms: u64,
 }
 

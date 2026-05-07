@@ -40,11 +40,11 @@ Target for the first stable release: **0.1.0**, scoped narrow on purpose. Anythi
 
 ## Phase 4 — Validation bridge
 
-- [ ] `#[derive(Validate)]` recording the constraint set listed in spec §7.
-- [ ] Codegen emits Valibot schemas; Zod is a CLI flag.
-- [ ] Pre-send and post-receive validation toggles per call.
+- [x] `#[derive(Validate)]` recording the constraint set listed in spec §7.
+- [x] Codegen emits Valibot schemas; Zod is a CLI flag.
+- [x] Pre-send and post-receive validation toggles per call.
 
-**Exit criteria:** A constraint added on the Rust side fails the TS build if downstream callers can't satisfy it.
+**Exit criteria:** A constraint added on the Rust side fails the TS build if downstream callers can't satisfy it. *(landed on main 2026-05-07)*
 
 ## Phase 5 — DX polish, then 0.1.0
 

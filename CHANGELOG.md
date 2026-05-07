@@ -19,6 +19,54 @@ Each entry below MUST note an IR or wire bump if one happened.
 
 ---
 
+## [Unreleased] — Phase 4
+
+### Added
+- `#[derive(Validate)]` proc-macro that emits `impl Validate for X` from `#[taut(...)]`
+  per-field attributes: `min`, `max`, `length(min, max)`, `pattern`, `email`, `url`,
+  `custom`. The trait collects all violations into `Vec<ValidationError>`.
+- Server-side input validation: `#[rpc]` and `#[rpc(stream)]` now insert a
+  `<Input as Validate>::validate(&input)` call after deserialization. Failures are
+  emitted as `{"err":{"code":"validation_error","payload":{"errors":[...]}}}` with
+  HTTP 400 (or as one SSE `event: error` frame for subscriptions).
+- Codegen: with the default `--validator valibot`, the generated `api.gen.ts` now
+  exports a `<Type>Schema` per IR TypeDef plus a `procedureSchemas` const map.
+  `--validator zod` emits Zod schemas. `--validator none` skips schema emission.
+- npm runtime: `ClientOptions.schemas` (typically passed `procedureSchemas`) and
+  `validate: { send, recv }` toggles. Pre-send and post-receive parsing throws
+  `TautError("validation_error", ...)` on mismatch.
+- `StandardError::ValidationFailed { errors: Vec<ValidationError> }` variant
+  (code = "validation_error", status 400).
+- Validate trait blanket impls for primitives, `()`, `Option<T>`, `Vec<T>` so
+  that any type usable as RPC input satisfies the trait without an explicit derive.
+- New runtime helpers in `validate::check`: `pattern` (compiles regex via `regex`
+  crate), generalised `min`/`max` for any `Into<f64> + Copy` numeric.
+- Helpers `validate::run` and `validate::collect` for macro emission.
+- Phase 4 example: `examples/phase4-validate/` — form validation with both
+  client-side (Valibot) and server-side enforcement.
+- Documentation: `docs/src/concepts/validation.md` rewritten and a new
+  `docs/src/guides/validation.md` cookbook.
+
+### Changed
+- IR shape: `Field` gained `constraints: Vec<Constraint>` (filled by `#[derive(Type)]`
+  from the same `#[taut(...)]` attrs Validate reads). Codegen renders these into
+  Valibot/Zod schemas.
+- `IR_VERSION` bumps from 0 → 1.
+- Phase 1/2/3 examples updated to derive `Validate` so they remain compatible
+  with the new macro emission.
+
+### IR
+- IR_VERSION = 1. New `Field.constraints` field. Old IR JSON without this field
+  is rejected by `cargo taut gen` with a clear error message.
+
+### Wire
+- New error code `validation_error` with payload shape
+  `{ "errors": [{ "path": "...", "constraint": "...", "message": "..." }] }`.
+- For subscriptions: validation failures emit a single `event: error` frame then
+  `event: end` (no SSE-level retry).
+
+---
+
 ## [Unreleased] — Agent tools
 
 ### Added

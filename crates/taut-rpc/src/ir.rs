@@ -16,6 +16,11 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Re-export of [`crate::validate::Constraint`] so that the IR module is the
+/// canonical home for the validation-constraint vocabulary recorded into a
+/// [`Field`]. The actual definition lives in [`crate::validate`] (SPEC §7).
+pub use crate::validate::Constraint;
+
 /// Root document written to `target/taut/ir.json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Ir {
@@ -26,7 +31,7 @@ pub struct Ir {
 
 impl Ir {
     /// Current IR schema version. See SPEC §9 — codegen refuses mismatches.
-    pub const CURRENT_VERSION: u32 = 0;
+    pub const CURRENT_VERSION: u32 = 1;
 
     /// Construct an empty IR document at the current schema version.
     pub fn empty() -> Self {
@@ -91,6 +96,11 @@ pub enum TypeShape {
 /// `optional` is true when the Rust type is `Option<T>`. `undefined` is true
 /// when the field is annotated `#[taut(undefined)]`, instructing codegen to
 /// emit `T | undefined` rather than `T | null` (SPEC §3.1).
+///
+/// `constraints` carries the per-field validation vocabulary recorded by
+/// `#[derive(Validate)]` (SPEC §7). The list is empty for fields that do not
+/// participate in validation; older IR documents (pre-`v1`) that omit the
+/// field deserialize as an empty vec.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Field {
     pub name: String,
@@ -98,6 +108,8 @@ pub struct Field {
     pub optional: bool,
     pub undefined: bool,
     pub doc: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub constraints: Vec<Constraint>,
 }
 
 /// A discriminated-union enum (SPEC §3.2).
@@ -207,6 +219,7 @@ mod tests {
                         optional: false,
                         undefined: false,
                         doc: None,
+                        constraints: vec![],
                     },
                     Field {
                         name: "name".to_string(),
@@ -214,6 +227,7 @@ mod tests {
                         optional: false,
                         undefined: false,
                         doc: None,
+                        constraints: vec![],
                     },
                     Field {
                         name: "nickname".to_string(),
@@ -221,6 +235,7 @@ mod tests {
                         optional: true,
                         undefined: false,
                         doc: None,
+                        constraints: vec![],
                     },
                 ]),
             }],
@@ -258,6 +273,7 @@ mod tests {
                                     optional: false,
                                     undefined: false,
                                     doc: None,
+                                    constraints: vec![],
                                 },
                                 Field {
                                     name: "name".to_string(),
@@ -265,6 +281,7 @@ mod tests {
                                     optional: false,
                                     undefined: true,
                                     doc: None,
+                                    constraints: vec![],
                                 },
                             ]),
                         },
@@ -273,5 +290,28 @@ mod tests {
             }],
         };
         assert_eq!(roundtrip(&ir), ir);
+    }
+
+    #[test]
+    fn field_roundtrips_with_constraints() {
+        // SPEC §7: a `#[derive(Validate)]` field records its per-field
+        // constraint vocabulary into the IR. Verify that a non-empty
+        // `constraints` vec survives a serde round-trip on the canonical
+        // `Field` shape.
+        let field = Field {
+            name: "score".to_string(),
+            ty: TypeRef::Primitive(Primitive::F64),
+            optional: false,
+            undefined: false,
+            doc: None,
+            constraints: vec![Constraint::Min(0.0), Constraint::Max(100.0)],
+        };
+
+        let json = serde_json::to_string(&field).expect("serialize Field");
+        let back: Field = serde_json::from_str(&json).expect("deserialize Field");
+        assert_eq!(back, field);
+        assert_eq!(back.constraints.len(), 2);
+        assert_eq!(back.constraints[0], Constraint::Min(0.0));
+        assert_eq!(back.constraints[1], Constraint::Max(100.0));
     }
 }

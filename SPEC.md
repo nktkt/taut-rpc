@@ -192,9 +192,107 @@ The runtime is one small npm package (`taut-rpc`) plus the per-project generated
 
 ## 7. Validation bridge
 
-`#[derive(Validate)]` on input types emits a per-field schema description into the IR. Codegen produces a Valibot schema (Zod is opt-in). The generated client validates inputs *before* sending and validates outputs *after* receiving by default; both can be disabled per-call.
+### 7.1 Trait + derive overview
 
-Constraints supported in 0.1: `min`, `max`, `length`, `pattern`, `email`, `url`. Custom predicates are recorded as opaque tags and require user-supplied schema fragments.
+The bridge is anchored by a single trait, `Validate`, with one method:
+`validate(&self) -> Result<(), Vec<ValidationError>>`. `#[derive(Validate)]`
+reads `#[taut(...)]` field attributes on the input type and emits the `impl
+Validate`. On the server side, the `#[rpc]` macro inserts a `validate()` call
+after deserialization and before invoking the user function; failures are
+mapped to a SPEC error envelope with `code = "validation_error"` (no user
+code runs when validation fails).
+
+### 7.2 Constraint vocabulary (v0.1)
+
+| Constraint | Applies to | Notes |
+|---|---|---|
+| `min` / `max` | numeric (integer or float) only | Inclusive bounds. |
+| `length(min = N, max = M)` | `String` and `Vec<_>` | For strings, **char count** (not byte count). Either bound may be omitted. |
+| `pattern` | `String` | Regex compiled by the `regex` crate at validate time. Compilation errors at macro-expansion time. |
+| `email` | `String` | Lax check — `x@y.z` shape, no MX or full RFC parsing. |
+| `url` | `String` | Lax check — `http://` or `https://` prefix. |
+| `custom = "name"` | any field | Opaque tag recorded in IR. Codegen leaves a comment for the user to wire a TS-side predicate; server-side, a user-defined function with the matching name is called. |
+
+### 7.3 IR shape
+
+The IR (see §9) carries validation as a `constraints` array on each `Field`:
+
+```
+Field { name, ty, optional, undefined, doc, constraints: Vec<Constraint> }
+Constraint = Min(f64) | Max(f64) | Length{min,max} | Pattern(String) | Email | Url | Custom(String)
+```
+
+Adding the `constraints` field bumps `IR_VERSION` from **0** to **1**. Codegen
+refuses IR with an unknown version (per §9).
+
+### 7.4 Wire format for validation errors
+
+Query / mutation:
+
+```
+HTTP 400
+Content-Type: application/json
+Body: {
+  "err": {
+    "code": "validation_error",
+    "payload": { "errors": [{"path": "...", "constraint": "...", "message": "..."}] }
+  }
+}
+```
+
+`path` is a dot/bracket path into the input (e.g. `"user.email"`,
+`"items[3].name"`); `constraint` is the lower-case constraint name
+(`"min"`, `"length"`, `"pattern"`, …); `message` is a human-readable
+diagnostic.
+
+For subscriptions, the same envelope is delivered as a single SSE
+`event: error` frame followed by `event: end`:
+
+```
+event: error\ndata: {"code":"validation_error","payload":{"errors":[...]}}\n\n
+event: end\ndata: \n\n
+```
+
+### 7.5 Codegen output (Valibot / Zod)
+
+`cargo taut gen --validator <kind>` controls schema emission:
+
+- `--validator valibot` (**default**) — emits a `<Type>Schema` constant for
+  each validated input type plus a `procedureSchemas` const map keyed by
+  procedure name (`{ input, output }` pairs).
+- `--validator zod` — same shapes, emitted as Zod schemas.
+- `--validator none` — no schemas emitted; the generated client cannot do
+  client-side validation, and **server-side validation is the only safety
+  net**.
+
+### 7.6 Client-side hooks
+
+```ts
+import { createApi } from "taut-rpc/client";
+import { procedureSchemas } from "./api.gen";
+
+const client = createApi({ url: "/rpc", schemas: procedureSchemas });
+```
+
+Passing `schemas` enables **pre-send** input validation and **post-receive**
+output validation by default. Either direction can be disabled via
+`ClientOptions`:
+
+```ts
+createApi({ schemas: procedureSchemas, validate: { send: false, recv: false } });
+```
+
+### 7.7 Limits (v0.1)
+
+- **No conditional validation.** A constraint cannot depend on another
+  field's value (e.g. `min` driven by a sibling). Use `custom = "..."`.
+- **No async validation.** Uniqueness checks, database lookups, and the like
+  are server-side concerns; surface them via a domain error type
+  (`#[derive(TautError)]`), not via `Validate`. Removing async also keeps the
+  client-side path synchronous.
+- **Output validation checks shape, not constraints.** The server is trusted
+  to honor its own contract; post-receive validation only confirms the
+  payload deserializes into the expected type.
 
 ## 8. Open questions
 
@@ -227,9 +325,37 @@ Constraints supported in 0.1: `min`, `max`, `length`, `pattern`, `email`, `url`.
 
 ## 9. Compatibility & versioning
 
-- IR has a `"ir_version"` field; codegen refuses mismatches.
-- Wire format has a `"v"` field on subscription frames; missing means v0.
-- The `taut-rpc` crate and the generated client are versioned together; the runtime npm package's major version tracks the crate's.
+- IR has an `ir_version` field; codegen refuses mismatches with a clear error.
+  Phase 4 bumps IR_VERSION from 0 to 1 to introduce per-Field `constraints`.
+  Older IR JSON without that field is treated as having `constraints: []`
+  (forward-compatible if the IR is regenerated; codegen will error on a
+  stale on-disk `ir.json`).
+- Wire format has a `v` field on subscription frames; missing means v0.
+- The taut-rpc crate and the generated client are versioned together; the
+  runtime npm package's major version tracks the crate's.
+- `cargo taut check` (Phase 5+) detects IR drift in CI.
+
+### 9.1 IR_VERSION transitions
+
+| Version | Phase landed | Shape change |
+|---|---|---|
+| 0 | Phase 0/1 | Initial shape: types, procedures, no per-field constraints. |
+| 1 | Phase 4 | Adds `Field.constraints: Vec<Constraint>` for the validation bridge. |
+
+When the IR shape changes incompatibly, the version bumps. Bumps are
+reserved for true on-disk format changes — adding a runtime feature
+(e.g. a new HTTP method, a new procedure kind variant) does NOT bump the
+IR version unless the JSON serialization changes shape.
+
+Migration policy from N → N+1:
+1. The new codegen reads the old IR if it can transparently default the
+   new fields. (Phase 4 example: missing `constraints` arrays default to
+   empty, so old IRs render identically until users add `#[taut(...)]`.)
+2. `taut_rpc::IR_VERSION` always advertises the CURRENT version. Tooling
+   that produces a different version will be rejected with an error
+   naming both versions.
+3. Backwards-incompatible changes (rare) require simultaneous crate
+   semver bumps.
 
 ## 10. v0.1 surface
 
@@ -259,6 +385,20 @@ land in later phases):
   TS client narrows `err.payload` on a `switch (err.code)`.
 - `Router::layer<L>(layer)` for `tower::Layer<axum::routing::Route>` (Phase 2):
   **shipping in v0.1**. Composes axum's standard middleware ecosystem.
+- `#[derive(Validate)]` macro (Phase 4): **shipping in v0.1**. Emits
+  `impl Validate` from `#[taut(...)]` field attributes; the `#[rpc]` macro
+  inserts a server-side `validate()` call after deserialization, mapping
+  failures to `code = "validation_error"` (HTTP 400).
+- Codegen Valibot schemas (Phase 4): **shipping in v0.1**. Default of
+  `cargo taut gen`; emits `<Type>Schema` constants and a `procedureSchemas`
+  map.
+- Codegen Zod schemas (Phase 4): **shipping in v0.1** behind
+  `--validator zod`. `--validator none` is also available to skip schema
+  emission entirely.
+- Client-side validation hooks (Phase 4): **shipping in v0.1**.
+  `createApi({ schemas: procedureSchemas })` enables pre-send and
+  post-receive validation by default; toggle per-client via
+  `validate: { send, recv }` in `ClientOptions`.
 - **State extractor support: still deferred.** axum's `State<S>` extractor is
   **not** supported in v0.1; procedures are free functions whose state must
   be reached via `OnceCell`/`static` for now. Planned for **Phase 5 or

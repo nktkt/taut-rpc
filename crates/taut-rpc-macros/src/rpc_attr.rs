@@ -322,10 +322,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
 fn expand_unary(func: &ItemFn, kind: ProcKind) -> syn::Result<TokenStream> {
     let fn_ident = func.sig.ident.clone();
     let fn_name_str = fn_ident.to_string();
-    let descriptor_ident = Ident::new(
-        &format!("__taut_proc_{fn_name_str}"),
-        Span::call_site(),
-    );
+    let descriptor_ident = Ident::new(&format!("__taut_proc_{fn_name_str}"), Span::call_site());
 
     let input_ty_opt = extract_input_type(func)?;
     let return_shape = classify_return(&func.sig.output);
@@ -344,13 +341,15 @@ fn expand_unary(func: &ItemFn, kind: ProcKind) -> syn::Result<TokenStream> {
     };
 
     // Tokens for the input side of the descriptor.
-    let input_ir_expr = match &input_ty_opt {
-        Some(ty) => quote!(<#ty as ::taut_rpc::TautType>::ir_type_ref()),
-        None => quote!(<() as ::taut_rpc::TautType>::ir_type_ref()),
+    let input_ir_expr = if let Some(ty) = &input_ty_opt {
+        quote!(<#ty as ::taut_rpc::TautType>::ir_type_ref())
+    } else {
+        quote!(<() as ::taut_rpc::TautType>::ir_type_ref())
     };
-    let input_collect = match &input_ty_opt {
-        Some(ty) => quote!(<#ty as ::taut_rpc::TautType>::collect_type_defs(&mut type_defs);),
-        None => quote!(<() as ::taut_rpc::TautType>::collect_type_defs(&mut type_defs);),
+    let input_collect = if let Some(ty) = &input_ty_opt {
+        quote!(<#ty as ::taut_rpc::TautType>::collect_type_defs(&mut type_defs);)
+    } else {
+        quote!(<() as ::taut_rpc::TautType>::collect_type_defs(&mut type_defs);)
     };
 
     // Tokens for the output (success) side of the descriptor.
@@ -371,7 +370,14 @@ fn expand_unary(func: &ItemFn, kind: ProcKind) -> syn::Result<TokenStream> {
     // The handler body needs two distinct shapes depending on the input arity
     // and another two depending on whether the user fn returns `Result`.
     //
-    // Decode step.
+    // Decode step. For typed input we also run server-side validation per
+    // SPEC §7: after a successful `serde_json::from_value`, we call
+    // `<I as Validate>::validate(&__input)` and surface any failures as an
+    // HTTP 400 with the `validation_error` envelope. Validate is required to
+    // be implemented by the input type — primitives, `()`, `String`,
+    // `Option<T>`, and `Vec<T>` get blanket impls in
+    // `taut_rpc::validate` so users only need `#[derive(Validate)]` on their
+    // own structs.
     let decode_block = if let Some(ty) = &input_ty_opt {
         quote! {
             let __input: #ty = match ::serde_json::from_value(__input_value) {
@@ -384,10 +390,20 @@ fn expand_unary(func: &ItemFn, kind: ProcKind) -> syn::Result<TokenStream> {
                     };
                 }
             };
+            if let ::std::result::Result::Err(__errors) =
+                <#ty as ::taut_rpc::Validate>::validate(&__input)
+            {
+                return ::taut_rpc::ProcedureResult::Err {
+                    http_status: 400,
+                    code: ::std::string::String::from("validation_error"),
+                    payload: ::serde_json::json!({ "errors": __errors }),
+                };
+            }
         }
     } else {
         // Zero-arg procedures expect a JSON `null` body; anything else is a
         // client bug and we surface it the same way as a decode failure.
+        // No validation step: the input is `()`.
         quote! {
             if !__input_value.is_null() {
                 return ::taut_rpc::ProcedureResult::Err {
@@ -518,10 +534,7 @@ fn expand_unary(func: &ItemFn, kind: ProcKind) -> syn::Result<TokenStream> {
 fn expand_stream(func: &ItemFn) -> syn::Result<TokenStream> {
     let fn_ident = func.sig.ident.clone();
     let fn_name_str = fn_ident.to_string();
-    let descriptor_ident = Ident::new(
-        &format!("__taut_proc_{fn_name_str}"),
-        Span::call_site(),
-    );
+    let descriptor_ident = Ident::new(&format!("__taut_proc_{fn_name_str}"), Span::call_site());
 
     let input_ty_opt = extract_input_type(func)?;
 
@@ -535,13 +548,15 @@ fn expand_stream(func: &ItemFn) -> syn::Result<TokenStream> {
     })?;
 
     // Tokens for the input side of the descriptor.
-    let input_ir_expr = match &input_ty_opt {
-        Some(ty) => quote!(<#ty as ::taut_rpc::TautType>::ir_type_ref()),
-        None => quote!(<() as ::taut_rpc::TautType>::ir_type_ref()),
+    let input_ir_expr = if let Some(ty) = &input_ty_opt {
+        quote!(<#ty as ::taut_rpc::TautType>::ir_type_ref())
+    } else {
+        quote!(<() as ::taut_rpc::TautType>::ir_type_ref())
     };
-    let input_collect = match &input_ty_opt {
-        Some(ty) => quote!(<#ty as ::taut_rpc::TautType>::collect_type_defs(&mut type_defs);),
-        None => quote!(<() as ::taut_rpc::TautType>::collect_type_defs(&mut type_defs);),
+    let input_collect = if let Some(ty) = &input_ty_opt {
+        quote!(<#ty as ::taut_rpc::TautType>::collect_type_defs(&mut type_defs);)
+    } else {
+        quote!(<() as ::taut_rpc::TautType>::collect_type_defs(&mut type_defs);)
     };
 
     // Output is the per-frame `Item` type — that's what shows up in the IR
@@ -567,6 +582,18 @@ fn expand_stream(func: &ItemFn) -> syn::Result<TokenStream> {
                     return;
                 }
             };
+            // Server-side validation per SPEC §7. On failure, emit a single
+            // `StreamFrame::Error` and terminate the stream (the wire layer
+            // closes the SSE connection after the error event).
+            if let ::std::result::Result::Err(__errors) =
+                <#ty as ::taut_rpc::Validate>::validate(&__input)
+            {
+                yield ::taut_rpc::StreamFrame::Error {
+                    code: ::std::string::String::from("validation_error"),
+                    payload: ::serde_json::json!({ "errors": __errors }),
+                };
+                return;
+            }
         }
     } else {
         quote! {
@@ -767,7 +794,9 @@ mod tests {
     #[test]
     fn extract_input_type_zero_args() {
         let func: ItemFn = parse_quote!(
-            async fn ping() -> String { String::new() }
+            async fn ping() -> String {
+                String::new()
+            }
         );
         let got = extract_input_type(&func).unwrap();
         assert!(got.is_none());
@@ -776,7 +805,9 @@ mod tests {
     #[test]
     fn extract_input_type_one_arg() {
         let func: ItemFn = parse_quote!(
-            async fn add(input: AddInput) -> i32 { 0 }
+            async fn add(input: AddInput) -> i32 {
+                0
+            }
         );
         let got = extract_input_type(&func).unwrap().unwrap();
         assert_eq!(quote!(#got).to_string(), "AddInput");
@@ -785,7 +816,9 @@ mod tests {
     #[test]
     fn extract_input_type_rejects_multi_arg() {
         let func: ItemFn = parse_quote!(
-            async fn add(a: i32, b: i32) -> i32 { a + b }
+            async fn add(a: i32, b: i32) -> i32 {
+                a + b
+            }
         );
         let err = extract_input_type(&func).unwrap_err();
         assert!(err.to_string().contains("wrap your arguments in a struct"));
@@ -794,7 +827,9 @@ mod tests {
     #[test]
     fn extract_input_type_rejects_self_receiver() {
         let func: ItemFn = parse_quote!(
-            async fn ping(&self) -> String { String::new() }
+            async fn ping(&self) -> String {
+                String::new()
+            }
         );
         let err = extract_input_type(&func).unwrap_err();
         assert!(err.to_string().contains("methods"));
@@ -1029,6 +1064,89 @@ mod tests {
         assert!(
             msg.contains("impl Stream<Item = T>"),
             "expected error pointing at `impl Stream<Item = T>`, got: {msg}"
+        );
+    }
+
+    // ----- Phase 4: server-side input validation hook -----
+
+    #[test]
+    fn expand_unary_emits_validate_call_for_typed_input() {
+        // For a unary procedure with a typed input, the emitted handler must
+        // call `<I as Validate>::validate(&__input)` after deserialization
+        // and surface the SPEC §7 envelope on failure.
+        let item = quote! {
+            async fn add(input: AddInput) -> i32 { 0 }
+        };
+        let out = expand(quote!(), item).unwrap().to_string();
+        assert!(
+            out.contains("< AddInput as :: taut_rpc :: Validate > :: validate (& __input)"),
+            "expected `<AddInput as ::taut_rpc::Validate>::validate(&__input)` call, got: {out}"
+        );
+        // SPEC §7 envelope: code is `validation_error`, status 400, payload
+        // carries the `errors` array.
+        assert!(
+            out.contains("\"validation_error\""),
+            "expected `validation_error` code in emitted tokens, got: {out}"
+        );
+        assert!(
+            out.contains("http_status : 400"),
+            "expected HTTP 400 status for validation failure, got: {out}"
+        );
+        assert!(
+            out.contains("\"errors\""),
+            "expected `errors` field in validation_error payload, got: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_unary_skips_validate_for_zero_input_fn() {
+        // Zero-input procedures have no `__input` to validate; the macro must
+        // not emit a `Validate::validate` call.
+        let item = quote! {
+            async fn ping() -> String { String::new() }
+        };
+        let out = expand(quote!(), item).unwrap().to_string();
+        assert!(
+            !out.contains(":: taut_rpc :: Validate"),
+            "expected no Validate call for zero-input fn, got: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_stream_emits_validate_call_for_typed_input() {
+        // Subscriptions run validation just before invoking the user's async
+        // fn; on failure they yield a single `StreamFrame::Error` and return.
+        let item = quote! {
+            async fn ticks(input: TicksInput) -> impl futures::Stream<Item = u64> + Send + 'static {
+                ::futures::stream::empty()
+            }
+        };
+        let out = expand(quote!(stream), item).unwrap().to_string();
+        assert!(
+            out.contains("< TicksInput as :: taut_rpc :: Validate > :: validate (& __input)"),
+            "expected `<TicksInput as ::taut_rpc::Validate>::validate(&__input)` call, got: {out}"
+        );
+        assert!(
+            out.contains("StreamFrame :: Error"),
+            "expected StreamFrame::Error emission for validation failure, got: {out}"
+        );
+        assert!(
+            out.contains("\"validation_error\""),
+            "expected `validation_error` code in emitted tokens, got: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_stream_skips_validate_for_zero_input_fn() {
+        let item = quote! {
+            async fn server_time() -> impl futures::Stream<Item = String> + Send + 'static {
+                ::futures::stream::empty()
+            }
+        };
+        let out = expand(quote!(stream), item).unwrap().to_string();
+        assert!(
+            !out.contains(":: taut_rpc :: Validate"),
+            "expected no Validate call for zero-input subscription, got: {out}"
         );
     }
 }

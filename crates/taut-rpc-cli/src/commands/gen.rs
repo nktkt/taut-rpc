@@ -14,6 +14,23 @@
 //!
 //! Once the IR is on disk, [`crate::codegen::render_ts`] turns it into a
 //! single `api.gen.ts` source string, which we write to `--out`.
+//!
+//! ## v0.1 validation flow
+//!
+//! The `--validator` flag selects which runtime validator (if any) the
+//! generated client targets. The choice is plumbed through as a single value
+//! per invocation:
+//!
+//! ```text
+//! clap (--validator)        → GenArgs::validator (this module's `Validator`)
+//!                          → CodegenOptions { validator, .. }
+//!                          → codegen::render_ts(&ir, &opts)
+//! ```
+//!
+//! Per `SPEC.md` §7, `valibot` is the v0.1 default. `zod` is opt-in for users
+//! already on Zod. `none` skips validator emission entirely — useful when the
+//! caller wants pure types and no runtime dependency. The actual schema
+//! emission lives in `codegen.rs`; this module only wires the flag.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -35,6 +52,17 @@ pub enum Validator {
     Zod,
     /// Do not emit any validation code.
     None,
+}
+
+impl Validator {
+    /// Lowercase label for user-facing messages (mirrors the clap value names).
+    fn label(self) -> &'static str {
+        match self {
+            Validator::Valibot => "valibot",
+            Validator::Zod => "zod",
+            Validator::None => "none",
+        }
+    }
 }
 
 impl From<Validator> for codegen::Validator {
@@ -97,12 +125,24 @@ pub struct GenArgs {
     #[arg(long, value_name = "PATH", default_value = "src/api.gen.ts")]
     pub out: PathBuf,
 
-    /// Validation runtime to target in the generated client.
+    /// Validator runtime for the generated client: valibot (default), zod, or none.
+    ///
+    /// `valibot` emits `import * as v from "valibot";` plus per-procedure
+    /// schemas. `zod` emits `import { z } from "zod";` plus per-procedure
+    /// schemas. `none` skips validator imports and emits pure types only.
     #[arg(long, value_name = "KIND", value_enum, default_value_t = Validator::Valibot)]
     pub validator: Validator,
 
-    /// How to render 64- and 128-bit integers.
-    #[arg(long, value_name = "STRATEGY", value_enum, default_value_t = BigIntStrategy::Native)]
+    /// How to render 64- and 128-bit integers: `native` (bigint) or `as-string`.
+    ///
+    /// `--bigint` is accepted as a shorter alias for `--bigint-strategy`.
+    #[arg(
+        long,
+        visible_alias = "bigint",
+        value_name = "STRATEGY",
+        value_enum,
+        default_value_t = BigIntStrategy::Native
+    )]
     pub bigint_strategy: BigIntStrategy,
 }
 
@@ -132,7 +172,11 @@ pub fn run(args: GenArgs) -> Result<()> {
             cwd.join(bin)
         };
         dump_ir_from_binary(&bin_abs, &ir_abs)?;
-        println!("dumped IR from {} to {}", bin_abs.display(), ir_abs.display());
+        println!(
+            "dumped IR from {} to {}",
+            bin_abs.display(),
+            ir_abs.display()
+        );
     }
 
     if !ir_abs.exists() {
@@ -178,7 +222,12 @@ pub fn run(args: GenArgs) -> Result<()> {
     std::fs::write(&out_abs, rendered.as_bytes())
         .with_context(|| format!("writing TS to {}", out_abs.display()))?;
 
-    println!("wrote {} bytes to {}", rendered.len(), out_abs.display());
+    println!(
+        "wrote {} bytes to {} (validator: {})",
+        rendered.len(),
+        out_abs.display(),
+        args.validator.label(),
+    );
     Ok(())
 }
 
@@ -191,10 +240,7 @@ pub fn run(args: GenArgs) -> Result<()> {
 /// readable error rather than just "process exited 2".
 fn dump_ir_from_binary(bin: &std::path::Path, ir_target: &std::path::Path) -> Result<()> {
     if !bin.exists() {
-        bail!(
-            "--from-binary path does not exist: {}",
-            bin.display()
-        );
+        bail!("--from-binary path does not exist: {}", bin.display());
     }
 
     // Make sure the parent of the IR target exists. The binary's

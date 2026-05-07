@@ -54,6 +54,13 @@ pub enum AuthError {
 }
 
 // --- Procedures -------------------------------------------------------------
+//
+// Phase 4 forward-compatibility: Phase 4 makes `#[rpc]` emit a `Validate` call
+// for every non-unit input. All three procedures below take zero args, so the
+// macro emits no validation calls and no `Validate` derive is required on any
+// type in this file. `User` is returned (not input) and `AuthError` is an
+// error type — neither needs `Validate`. No constraint changes are needed for
+// this example to keep compiling under Phase 4.
 
 /// Public health-check style query. The auth layer lets requests to this path
 /// through unconditionally.

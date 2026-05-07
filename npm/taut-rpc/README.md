@@ -32,6 +32,7 @@ const client = createClient<Procedures>({
   url: "/rpc",
   // transport defaults to fetch + EventSource; override for tests, auth, etc.
   // transport: customTransport,
+  // Pass `schemas: procedureSchemas` (from api.gen.ts) to enable runtime validation.
 });
 
 // Query / mutation
@@ -46,6 +47,27 @@ for await (const evt of client.userEvents.subscribe({ userId: 1 })) {
 The shape of `client` is derived entirely from the `Procedures` type in
 `api.gen.ts`. Renaming or removing a `#[rpc]` function in Rust regenerates the
 file and surfaces as a TypeScript error at the call site.
+
+## Disabling validation per call
+
+The Phase 4 runtime exposes a per-CLIENT toggle (`createClient({ ..., validate: { send: false } })`)
+but not a per-call override. The recommended pattern is to instantiate two clients:
+
+```ts
+const userClient = createClient<Procedures>({ url, schemas: procedureSchemas });           // strict
+const internalClient = createClient<Procedures>({ url, schemas: procedureSchemas, validate: { send: false } });
+
+await userClient.create_user(form);                  // validates
+await internalClient.create_user(trusted_payload);   // skips schema.parse on input
+```
+
+Both clients share the underlying transport contract — no extra connection or
+memory cost. Use the strict client for anything derived from user input
+(forms, query strings, third-party webhooks); reach for the unvalidated client
+only on internally-trusted code paths where the input shape is already known
+to match the procedure's declared type. A per-call `validate` override is a
+v0.2 consideration; for now, the two-client split keeps the trust boundary
+visible at the call site.
 
 ## Subpath exports
 
@@ -62,6 +84,20 @@ documented in [SPEC.md §4](https://github.com/nktkt/taut-rpc/blob/main/SPEC.md)
 and gated by an `ir_version` field; mismatches are refused by codegen.
 
 ## Changelog
+
+## 0.0.0 — Phase 4
+
+- `ClientOptions.schemas` accepts a `procedureSchemas` map emitted by codegen
+  (Valibot or Zod). When set, the runtime parses inputs before sending and
+  outputs after receiving.
+- `ClientOptions.validate: { send, recv }` toggles per-client (defaults to
+  `{ send: true, recv: true }`).
+- A failing parse throws `TautError("validation_error", { errors: [...] }, 0)`,
+  reusing the same envelope shape the server emits on its own `Validate`
+  rejection.
+- For subscriptions, output validation runs on each yielded frame.
+- New `SchemaLike` interface — duck-type for anything with a `parse(value)` method,
+  so user-supplied custom validators slot into `procedureSchemas` cleanly.
 
 ## 0.0.0 — Phase 3
 

@@ -4,7 +4,7 @@
 //! `taut-rpc` and import the macros via its re-exports rather than depending on
 //! this crate directly.
 //!
-//! Three macros are provided through Phase 2:
+//! Four macros are provided through Phase 4:
 //!
 //! - `#[rpc]` — attribute macro applied to a free `async fn` (queries and
 //!   mutations only in Phase 1; `#[rpc(stream)]` lands in Phase 3). Supports
@@ -17,6 +17,10 @@
 //! - `#[derive(TautError)]` — derive macro that supplies the `TautError`
 //!   trait impl (per-variant `code()` and `http_status()`) for an enum. See
 //!   SPEC §3.3 (errors).
+//! - `#[derive(Validate)]` — derive macro that emits the `Validate` trait impl
+//!   from per-field `#[taut(...)]` constraint attributes (`min`, `max`,
+//!   `length`, `pattern`, `email`, `url`, `custom`). See SPEC §7 (validation
+//!   bridge).
 //!
 //! All macros report errors via `syn::Error::into_compile_error` so failures
 //! surface as compiler diagnostics rather than panics.
@@ -25,6 +29,7 @@ use proc_macro::TokenStream;
 
 mod derive_taut_error;
 mod derive_type;
+mod derive_validate;
 mod rpc_attr;
 
 /// Marks an `async fn` as a `taut-rpc` procedure.
@@ -50,12 +55,25 @@ pub fn derive_type(input: TokenStream) -> TokenStream {
 }
 
 /// Derives `taut-rpc`'s `TautError` trait for an enum, supplying `code()`
-/// (default: variant name in snake_case) and `http_status()` (default: 400)
+/// (default: variant name in `snake_case`) and `http_status()` (default: 400)
 /// per variant. Both can be overridden via `#[taut(code = "...", status =
 /// 401)]`. See SPEC §3.3.
 #[proc_macro_derive(TautError, attributes(taut))]
 pub fn derive_taut_error(input: TokenStream) -> TokenStream {
     derive_taut_error::expand(input.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Derives `taut-rpc`'s `Validate` trait for a struct or enum, walking each
+/// field's `#[taut(...)]` constraints (`min`, `max`, `length`, `pattern`,
+/// `email`, `url`, `custom`) and dispatching to the corresponding
+/// `validate::check::*` runtime helpers. Foreign `#[taut(...)]` keys owned by
+/// other derives (`rename`, `tag`, `optional`, `undefined`, `code`, `status`)
+/// are silently ignored. See SPEC §7.
+#[proc_macro_derive(Validate, attributes(taut))]
+pub fn derive_validate(input: TokenStream) -> TokenStream {
+    derive_validate::expand(input.into())
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }

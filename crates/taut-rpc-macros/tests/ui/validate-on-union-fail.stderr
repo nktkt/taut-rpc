@@ -1,0 +1,5 @@
+error: taut_rpc: unions are not supported by #[derive(Validate)]
+ --> tests/ui/validate-on-union-fail.rs:3:1
+  |
+3 | union U { a: u32, b: f32 }
+  | ^^^^^

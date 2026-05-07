@@ -31,6 +31,14 @@ All input/output/error types use `#[derive(serde::Serialize, serde::Deserialize,
 taut_rpc::Type)]`. Errors additionally derive `thiserror::Error` and tag/payload
 their JSON shape per SPEC §3.3.
 
+For Phase 4 compatibility the input types (`AddInput`, `GetUserInput`) also
+derive `taut_rpc::Validate`. With no `#[taut(...)]` constraints attached, the
+generated `validate` impl is a no-op that always returns `Ok(())` — the `#[rpc]`
+macro still emits the validation call site, so the example builds cleanly under
+the Phase 4 server pipeline. Output and error types do not need `Validate`:
+Phase 4 only validates *inputs* server-side (output validation happens
+client-side via the schema).
+
 ## Run the server
 
 The example is outside the workspace, so the usual `cargo run -p phase1-server`

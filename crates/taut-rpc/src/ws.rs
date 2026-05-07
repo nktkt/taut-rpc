@@ -71,9 +71,9 @@ pub(crate) mod ws_route {
            + 'static {
         move |upgrade: WebSocketUpgrade| {
             let descriptors = descriptors.clone();
-            Box::pin(async move {
-                upgrade.on_upgrade(move |socket| handle_socket(socket, descriptors))
-            })
+            Box::pin(
+                async move { upgrade.on_upgrade(move |socket| handle_socket(socket, descriptors)) },
+            )
         }
     }
 
@@ -87,8 +87,7 @@ pub(crate) mod ws_route {
     async fn handle_socket(socket: WebSocket, descriptors: Arc<Vec<ProcedureDescriptor>>) {
         let mut active: HashMap<u64, AbortHandle> = HashMap::new();
         let (mut tx, mut rx) = socket.split();
-        let (frame_tx, mut frame_rx) =
-            tokio::sync::mpsc::unbounded_channel::<Message>();
+        let (frame_tx, mut frame_rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
 
         // Writer task: drains frame_rx into the WS sink in arrival order.
         // Bails out on send error (peer closed) so we don't pile up frames
@@ -118,10 +117,8 @@ pub(crate) mod ws_route {
             // variants exist on the same enum so the same type can be used by
             // server and client codecs, not because the server is obligated
             // to handle them inbound.
-            let parsed: Result<
-                crate::wire::WsMessage<serde_json::Value, serde_json::Value>,
-                _,
-            > = serde_json::from_str(&text);
+            let parsed: Result<crate::wire::WsMessage<serde_json::Value, serde_json::Value>, _> =
+                serde_json::from_str(&text);
             let parsed = match parsed {
                 Ok(p) => p,
                 Err(e) => {
@@ -249,9 +246,7 @@ pub(crate) mod ws_route {
                                 }),
                             };
                             if frame_tx
-                                .send(Message::Text(
-                                    serde_json::to_string(&envelope).unwrap(),
-                                ))
+                                .send(Message::Text(serde_json::to_string(&envelope).unwrap()))
                                 .is_err()
                             {
                                 // Writer is gone (socket closed); abandon the

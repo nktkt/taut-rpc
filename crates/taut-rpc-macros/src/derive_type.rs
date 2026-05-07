@@ -13,13 +13,22 @@
 //!
 //! Supported attribute keys (parsed from `#[taut(...)]`):
 //!
-//! | Position           | Key                  | Effect                                              |
-//! |--------------------|----------------------|-----------------------------------------------------|
-//! | type (struct/enum) | `rename = "..."`     | Override the IR type name.                          |
-//! | type (enum)        | `tag = "..."`        | Override the discriminator tag (default `"type"`).  |
-//! | field              | `rename = "..."`     | Override the IR field name.                         |
-//! | field              | `optional`           | Set `Field.optional = true` (TS `field?: T`).       |
-//! | field              | `undefined`          | Set `Field.undefined = true` (`T | undefined`).     |
+//! | Position           | Key                       | Effect                                              |
+//! |--------------------|---------------------------|-----------------------------------------------------|
+//! | type (struct/enum) | `rename = "..."`          | Override the IR type name.                          |
+//! | type (enum)        | `tag = "..."`             | Override the discriminator tag (default `"type"`).  |
+//! | field              | `rename = "..."`          | Override the IR field name.                         |
+//! | field              | `optional`                | Set `Field.optional = true` (TS `field?: T`).       |
+//! | field              | `undefined`               | Set `Field.undefined = true` (`T | undefined`).     |
+//! | field              | `min = N`, `max = N`      | Numeric range constraint (SPEC §7).                 |
+//! | field              | `length(min = .., max = ..)` | String length constraint (SPEC §7).              |
+//! | field              | `pattern = "..."`         | Regex pattern constraint (SPEC §7).                 |
+//! | field              | `email`, `url`            | Built-in string-format constraints (SPEC §7).       |
+//! | field              | `custom = "..."`          | Opaque user-supplied predicate tag (SPEC §7).       |
+//!
+//! Field-level validation constraints (`min`, `max`, `length`, `pattern`,
+//! `email`, `url`, `custom`) are recorded into the emitted IR `Field`'s
+//! `constraints` vec so codegen can lower them to a Valibot/Zod schema.
 //!
 //! Unknown keys, generic parameters, lifetime parameters, and `union`s are
 //! reported as compile errors via [`syn::Error`]; the macro never panics on
@@ -117,6 +126,7 @@ fn expand_struct(s: &DataStruct) -> syn::Result<(TokenStream, TokenStream)> {
                 let optional = attrs.optional;
                 let undefined = attrs.undefined;
                 let doc = doc_tokens(extract_doc(&f.attrs));
+                let constraints = constraints_tokens(&attrs.constraints);
                 field_tokens.push(quote_spanned! {f.span()=>
                     ::taut_rpc::ir::Field {
                         name: #name_lit.to_string(),
@@ -124,6 +134,7 @@ fn expand_struct(s: &DataStruct) -> syn::Result<(TokenStream, TokenStream)> {
                         optional: #optional,
                         undefined: #undefined,
                         doc: #doc,
+                        constraints: #constraints,
                     }
                 });
                 collect_tokens.push(quote_spanned! {f.span()=>
@@ -201,23 +212,26 @@ fn expand_struct(s: &DataStruct) -> syn::Result<(TokenStream, TokenStream)> {
 // Enum expansion
 // ----------------------------------------------------------------------------
 
-fn expand_enum(e: &DataEnum, tag_override: Option<&str>) -> syn::Result<(TokenStream, TokenStream)> {
+fn expand_enum(
+    e: &DataEnum,
+    tag_override: Option<&str>,
+) -> syn::Result<(TokenStream, TokenStream)> {
     let tag = tag_override.unwrap_or("type").to_string();
     let tag_lit = LitStr::new(&tag, proc_macro2::Span::call_site());
 
-    let mut variants_tokens = Vec::with_capacity(e.variants.len());
+    let mut variants = Vec::with_capacity(e.variants.len());
     let mut collect_tokens = Vec::new();
 
     for v in &e.variants {
         let (variant_tokens, variant_collect) = expand_variant(v)?;
-        variants_tokens.push(variant_tokens);
+        variants.push(variant_tokens);
         collect_tokens.push(variant_collect);
     }
 
     let shape = quote! {
         ::taut_rpc::ir::TypeShape::Enum(::taut_rpc::ir::EnumDef {
             tag: #tag_lit.to_string(),
-            variants: ::std::vec![ #( #variants_tokens ),* ],
+            variants: ::std::vec![ #( #variants ),* ],
         })
     };
     let collect = quote! { #( #collect_tokens )* };
@@ -232,10 +246,7 @@ fn expand_variant(v: &SynVariant) -> syn::Result<(TokenStream, TokenStream)> {
     let name_lit = LitStr::new(&name, v.ident.span());
 
     let (payload, collect) = match &v.fields {
-        Fields::Unit => (
-            quote! { ::taut_rpc::ir::VariantPayload::Unit },
-            quote! {},
-        ),
+        Fields::Unit => (quote! { ::taut_rpc::ir::VariantPayload::Unit }, quote! {}),
         Fields::Unnamed(unnamed) => {
             let fields: Vec<&SynField> = unnamed.unnamed.iter().collect();
             for f in &fields {
@@ -275,6 +286,7 @@ fn expand_variant(v: &SynVariant) -> syn::Result<(TokenStream, TokenStream)> {
                 let optional = attrs.optional;
                 let undefined = attrs.undefined;
                 let doc = doc_tokens(extract_doc(&f.attrs));
+                let constraints = constraints_tokens(&attrs.constraints);
                 field_tokens.push(quote_spanned! {f.span()=>
                     ::taut_rpc::ir::Field {
                         name: #name_lit.to_string(),
@@ -282,6 +294,7 @@ fn expand_variant(v: &SynVariant) -> syn::Result<(TokenStream, TokenStream)> {
                         optional: #optional,
                         undefined: #undefined,
                         doc: #doc,
+                        constraints: #constraints,
                     }
                 });
                 collect_tokens.push(quote_spanned! {f.span()=>
@@ -350,11 +363,29 @@ impl TypeAttrs {
     }
 }
 
+/// One parsed validation constraint attached to a struct/struct-variant field.
+///
+/// Mirrors the public `::taut_rpc::ir::Constraint` enum (re-exported from
+/// `::taut_rpc::validate::Constraint`). The macro records constraints in this
+/// shape during parsing and lowers them to a token literal in
+/// [`constraint_tokens`] when emitting the IR `Field`.
+#[derive(Debug)]
+enum ConstraintTokens {
+    Min(f64),
+    Max(f64),
+    Length { min: Option<u32>, max: Option<u32> },
+    Pattern(String),
+    Email,
+    Url,
+    Custom(String),
+}
+
 #[derive(Debug, Default)]
 struct FieldAttrs {
     rename: Option<String>,
     optional: bool,
     undefined: bool,
+    constraints: Vec<ConstraintTokens>,
 }
 
 impl FieldAttrs {
@@ -375,6 +406,33 @@ impl FieldAttrs {
                 } else if meta.path.is_ident("undefined") {
                     out.undefined = true;
                     Ok(())
+                } else if meta.path.is_ident("min") {
+                    let v = parse_f64_meta(&meta)?;
+                    out.constraints.push(ConstraintTokens::Min(v));
+                    Ok(())
+                } else if meta.path.is_ident("max") {
+                    let v = parse_f64_meta(&meta)?;
+                    out.constraints.push(ConstraintTokens::Max(v));
+                    Ok(())
+                } else if meta.path.is_ident("length") {
+                    let (min, max) = parse_length_meta(&meta)?;
+                    out.constraints
+                        .push(ConstraintTokens::Length { min, max });
+                    Ok(())
+                } else if meta.path.is_ident("pattern") {
+                    let s: LitStr = meta.value()?.parse()?;
+                    out.constraints.push(ConstraintTokens::Pattern(s.value()));
+                    Ok(())
+                } else if meta.path.is_ident("email") {
+                    out.constraints.push(ConstraintTokens::Email);
+                    Ok(())
+                } else if meta.path.is_ident("url") {
+                    out.constraints.push(ConstraintTokens::Url);
+                    Ok(())
+                } else if meta.path.is_ident("custom") {
+                    let s: LitStr = meta.value()?.parse()?;
+                    out.constraints.push(ConstraintTokens::Custom(s.value()));
+                    Ok(())
                 } else if meta.path.is_ident("code") || meta.path.is_ident("status") {
                     // Owned by `#[derive(TautError)]`; consume any value and skip.
                     if meta.input.peek(Token![=]) {
@@ -384,12 +442,150 @@ impl FieldAttrs {
                 } else {
                     let key = path_to_string(&meta.path);
                     Err(meta.error(format!(
-                        "unknown taut attribute key: {key}; supported keys are rename, tag, optional, undefined, code, status"
+                        "unknown taut attribute key: {key}; supported keys are rename, optional, undefined, min, max, length, pattern, email, url, custom, code, status"
                     )))
                 }
             })?;
         }
         Ok(out)
+    }
+}
+
+/// Parse a numeric (`Int` or `Float`) literal from `meta.value()` and coerce
+/// it to `f64`. Used for `min = N` / `max = N`.
+fn parse_f64_meta(meta: &syn::meta::ParseNestedMeta) -> syn::Result<f64> {
+    let lit: Lit = meta.value()?.parse()?;
+    lit_to_f64(&lit)
+}
+
+fn lit_to_f64(lit: &Lit) -> syn::Result<f64> {
+    match lit {
+        Lit::Int(i) => i.base10_parse::<f64>(),
+        Lit::Float(f) => f.base10_parse::<f64>(),
+        other => Err(syn::Error::new(
+            other.span(),
+            "taut_rpc: expected numeric literal (integer or float) for min/max",
+        )),
+    }
+}
+
+fn lit_to_u32(lit: &Lit) -> syn::Result<u32> {
+    match lit {
+        Lit::Int(i) => i.base10_parse::<u32>(),
+        other => Err(syn::Error::new(
+            other.span(),
+            "taut_rpc: expected u32 integer literal for length bounds",
+        )),
+    }
+}
+
+/// Parse `length(min = N, max = M)` — both bounds optional, but at least one
+/// must be present.
+fn parse_length_meta(meta: &syn::meta::ParseNestedMeta) -> syn::Result<(Option<u32>, Option<u32>)> {
+    let mut min: Option<u32> = None;
+    let mut max: Option<u32> = None;
+    let span = meta.path.span();
+    meta.parse_nested_meta(|inner| {
+        if inner.path.is_ident("min") {
+            let lit: Lit = inner.value()?.parse()?;
+            min = Some(lit_to_u32(&lit)?);
+            Ok(())
+        } else if inner.path.is_ident("max") {
+            let lit: Lit = inner.value()?.parse()?;
+            max = Some(lit_to_u32(&lit)?);
+            Ok(())
+        } else {
+            let key = path_to_string(&inner.path);
+            Err(inner.error(format!(
+                "taut_rpc: unknown key in length(...): {key}; expected min or max"
+            )))
+        }
+    })?;
+    if min.is_none() && max.is_none() {
+        return Err(syn::Error::new(
+            span,
+            "taut_rpc: length(...) requires at least one of min or max",
+        ));
+    }
+    Ok((min, max))
+}
+
+/// Lower an `f64` to a Rust float-literal token stream (`<v>f64`).
+///
+/// `syn::LitFloat` does not represent the leading `-` (Rust treats unary
+/// negation as an operator, not part of the literal), so for negative
+/// values we emit `- <lit>` as a two-token stream. We always append the
+/// explicit `f64` suffix so the emitted token is unambiguous regardless of
+/// how the value formats via `Display` (`100.0_f64` formats as `"100"`).
+fn f64_lit_tokens(v: f64) -> TokenStream {
+    if v < 0.0 {
+        let abs = -v;
+        let lit = syn::LitFloat::new(&format!("{abs}f64"), proc_macro2::Span::call_site());
+        quote! { -#lit }
+    } else {
+        let lit = syn::LitFloat::new(&format!("{v}f64"), proc_macro2::Span::call_site());
+        quote! { #lit }
+    }
+}
+
+/// Lower a slice of [`ConstraintTokens`] to a `vec![ Constraint::..., ... ]`
+/// token literal that constructs the runtime IR `Constraint` enum.
+fn constraints_tokens(constraints: &[ConstraintTokens]) -> TokenStream {
+    if constraints.is_empty() {
+        return quote! { ::std::vec![] };
+    }
+    let elems = constraints.iter().map(constraint_tokens);
+    quote! { ::std::vec![ #( #elems ),* ] }
+}
+
+fn constraint_tokens(c: &ConstraintTokens) -> TokenStream {
+    match c {
+        ConstraintTokens::Min(v) => {
+            // Emit as a Rust float literal so the token is unambiguous
+            // regardless of whether the user wrote an integer or float in the
+            // source attribute. Negative values are emitted as `-<lit>` since
+            // Rust treats unary minus as an operator outside the literal.
+            let v_lit = f64_lit_tokens(*v);
+            quote! { ::taut_rpc::ir::Constraint::Min(#v_lit) }
+        }
+        ConstraintTokens::Max(v) => {
+            let v_lit = f64_lit_tokens(*v);
+            quote! { ::taut_rpc::ir::Constraint::Max(#v_lit) }
+        }
+        ConstraintTokens::Length { min, max } => {
+            let min_tokens = if let Some(n) = min {
+                let lit = syn::LitInt::new(&format!("{n}u32"), proc_macro2::Span::call_site());
+                quote! { ::std::option::Option::Some(#lit) }
+            } else {
+                quote! { ::std::option::Option::None }
+            };
+            let max_tokens = if let Some(n) = max {
+                let lit = syn::LitInt::new(&format!("{n}u32"), proc_macro2::Span::call_site());
+                quote! { ::std::option::Option::Some(#lit) }
+            } else {
+                quote! { ::std::option::Option::None }
+            };
+            quote! {
+                ::taut_rpc::ir::Constraint::Length {
+                    min: #min_tokens,
+                    max: #max_tokens,
+                }
+            }
+        }
+        ConstraintTokens::Pattern(s) => {
+            let lit = LitStr::new(s, proc_macro2::Span::call_site());
+            quote! { ::taut_rpc::ir::Constraint::Pattern(#lit.to_string()) }
+        }
+        ConstraintTokens::Email => {
+            quote! { ::taut_rpc::ir::Constraint::Email }
+        }
+        ConstraintTokens::Url => {
+            quote! { ::taut_rpc::ir::Constraint::Url }
+        }
+        ConstraintTokens::Custom(s) => {
+            let lit = LitStr::new(s, proc_macro2::Span::call_site());
+            quote! { ::taut_rpc::ir::Constraint::Custom(#lit.to_string()) }
+        }
     }
 }
 
@@ -473,12 +669,11 @@ fn extract_doc(attrs: &[Attribute]) -> Option<String> {
 /// Lower an `Option<String>` doc into a token stream that produces the same
 /// `Option<String>` at runtime.
 fn doc_tokens(doc: Option<String>) -> TokenStream {
-    match doc {
-        Some(s) => {
-            let lit = LitStr::new(&s, proc_macro2::Span::call_site());
-            quote! { ::std::option::Option::Some(#lit.to_string()) }
-        }
-        None => quote! { ::std::option::Option::None },
+    if let Some(s) = doc {
+        let lit = LitStr::new(&s, proc_macro2::Span::call_site());
+        quote! { ::std::option::Option::Some(#lit.to_string()) }
+    } else {
+        quote! { ::std::option::Option::None }
     }
 }
 
@@ -543,11 +738,279 @@ mod tests {
 
     #[test]
     fn field_attrs_parses_optional_and_undefined_flags() {
-        let attrs: Vec<Attribute> =
-            vec![parse_quote!(#[taut(optional, undefined, rename = "x")])];
+        let attrs: Vec<Attribute> = vec![parse_quote!(#[taut(optional, undefined, rename = "x")])];
         let parsed = FieldAttrs::parse(&attrs).expect("parse");
         assert!(parsed.optional);
         assert!(parsed.undefined);
         assert_eq!(parsed.rename.as_deref(), Some("x"));
+    }
+
+    // -- Constraint attribute parsing -----------------------------------------
+
+    #[test]
+    fn field_attrs_parses_min_and_max_as_f64() {
+        // Integer literals coerce to f64; float literals also accepted.
+        let attrs: Vec<Attribute> = vec![parse_quote!(#[taut(min = 0, max = 100)])];
+        let parsed = FieldAttrs::parse(&attrs).expect("parse");
+        assert_eq!(parsed.constraints.len(), 2);
+        match &parsed.constraints[0] {
+            ConstraintTokens::Min(v) => assert_eq!(*v, 0.0_f64),
+            other => panic!("expected Min, got {other:?}"),
+        }
+        match &parsed.constraints[1] {
+            ConstraintTokens::Max(v) => assert_eq!(*v, 100.0_f64),
+            other => panic!("expected Max, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn field_attrs_parses_length_with_both_bounds() {
+        let attrs: Vec<Attribute> = vec![parse_quote!(#[taut(length(min = 3, max = 32))])];
+        let parsed = FieldAttrs::parse(&attrs).expect("parse");
+        assert_eq!(parsed.constraints.len(), 1);
+        match &parsed.constraints[0] {
+            ConstraintTokens::Length { min, max } => {
+                assert_eq!(*min, Some(3));
+                assert_eq!(*max, Some(32));
+            }
+            other => panic!("expected Length, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn field_attrs_parses_length_with_only_max() {
+        let attrs: Vec<Attribute> = vec![parse_quote!(#[taut(length(max = 64))])];
+        let parsed = FieldAttrs::parse(&attrs).expect("parse");
+        match &parsed.constraints[0] {
+            ConstraintTokens::Length { min, max } => {
+                assert_eq!(*min, None);
+                assert_eq!(*max, Some(64));
+            }
+            other => panic!("expected Length, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn field_attrs_rejects_empty_length() {
+        // `length()` fails inside syn's nested-meta parser before our own
+        // "at least one of min/max" check fires (the parser rejects an empty
+        // meta list as "expected nested attribute"). Either error message is
+        // acceptable; the user-visible behaviour is "compile error on empty
+        // length()".
+        let attrs: Vec<Attribute> = vec![parse_quote!(#[taut(length())])];
+        let _err = FieldAttrs::parse(&attrs).expect_err("empty length must error");
+    }
+
+    #[test]
+    fn field_attrs_rejects_unknown_length_key() {
+        let attrs: Vec<Attribute> = vec![parse_quote!(#[taut(length(other = 1))])];
+        let err = FieldAttrs::parse(&attrs).expect_err("unknown inner key must error");
+        assert!(
+            err.to_string().contains("unknown key in length"),
+            "error message was: {err}"
+        );
+    }
+
+    #[test]
+    fn field_attrs_parses_pattern_and_custom_strings() {
+        let attrs: Vec<Attribute> = vec![
+            parse_quote!(#[taut(pattern = "^\\d+$")]),
+            parse_quote!(#[taut(custom = "must_be_prime")]),
+        ];
+        let parsed = FieldAttrs::parse(&attrs).expect("parse");
+        assert_eq!(parsed.constraints.len(), 2);
+        match &parsed.constraints[0] {
+            ConstraintTokens::Pattern(s) => assert_eq!(s, r"^\d+$"),
+            other => panic!("expected Pattern, got {other:?}"),
+        }
+        match &parsed.constraints[1] {
+            ConstraintTokens::Custom(s) => assert_eq!(s, "must_be_prime"),
+            other => panic!("expected Custom, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn field_attrs_parses_email_and_url_bare_idents() {
+        let attrs: Vec<Attribute> = vec![parse_quote!(#[taut(email, url)])];
+        let parsed = FieldAttrs::parse(&attrs).expect("parse");
+        assert_eq!(parsed.constraints.len(), 2);
+        assert!(matches!(parsed.constraints[0], ConstraintTokens::Email));
+        assert!(matches!(parsed.constraints[1], ConstraintTokens::Url));
+    }
+
+    // -- IR emission contains constraint literals -----------------------------
+
+    fn emit(input: TokenStream) -> String {
+        expand(input).expect("expand").to_string()
+    }
+
+    #[test]
+    fn field_with_min_max_constraints_emits_them() {
+        let out = emit(quote! {
+            struct Profile {
+                #[taut(min = 0, max = 100)]
+                age: u8,
+            }
+        });
+        let normalized: String = out.split_whitespace().collect();
+        assert!(
+            normalized.contains("Constraint::Min(0f64)"),
+            "expected Min(0f64) literal, got: {out}"
+        );
+        assert!(
+            normalized.contains("Constraint::Max(100f64)"),
+            "expected Max(100f64) literal, got: {out}"
+        );
+    }
+
+    #[test]
+    fn field_with_length_constraint() {
+        let out = emit(quote! {
+            struct Account {
+                #[taut(length(min = 3, max = 32))]
+                username: String,
+            }
+        });
+        // The emitted token stream is whitespace-canonicalised by `to_string()`
+        // (spaces around `::` and around `{`/`}`). Strip whitespace before
+        // matching so the assertion isn't sensitive to formatting.
+        let normalized: String = out.split_whitespace().collect();
+        assert!(
+            normalized.contains("Constraint::Length"),
+            "expected Constraint::Length, got: {out}"
+        );
+        assert!(
+            normalized.contains("Some(3u32)"),
+            "expected Some(3u32) for length min, got: {out}"
+        );
+        assert!(
+            normalized.contains("Some(32u32)"),
+            "expected Some(32u32) for length max, got: {out}"
+        );
+    }
+
+    #[test]
+    fn field_with_email_constraint() {
+        let out = emit(quote! {
+            struct Signup {
+                #[taut(email)]
+                contact: String,
+            }
+        });
+        let normalized: String = out.split_whitespace().collect();
+        assert!(
+            normalized.contains("Constraint::Email"),
+            "expected Constraint::Email literal, got: {out}"
+        );
+    }
+
+    #[test]
+    fn field_with_url_constraint() {
+        let out = emit(quote! {
+            struct Link {
+                #[taut(url)]
+                href: String,
+            }
+        });
+        let normalized: String = out.split_whitespace().collect();
+        assert!(
+            normalized.contains("Constraint::Url"),
+            "expected Constraint::Url literal, got: {out}"
+        );
+    }
+
+    #[test]
+    fn field_with_pattern_and_custom_constraints_emit_string_literals() {
+        let out = emit(quote! {
+            struct Token {
+                #[taut(pattern = "^[a-z]+$", custom = "must_be_prime")]
+                value: String,
+            }
+        });
+        let normalized: String = out.split_whitespace().collect();
+        assert!(
+            normalized.contains("Constraint::Pattern"),
+            "expected Constraint::Pattern literal, got: {out}"
+        );
+        assert!(
+            out.contains("\"^[a-z]+$\""),
+            "expected pattern string literal in output, got: {out}"
+        );
+        assert!(
+            normalized.contains("Constraint::Custom"),
+            "expected Constraint::Custom literal, got: {out}"
+        );
+        assert!(
+            out.contains("\"must_be_prime\""),
+            "expected custom-tag string literal in output, got: {out}"
+        );
+    }
+
+    #[test]
+    fn field_with_no_taut_constraints_emits_empty_vec() {
+        let out = emit(quote! {
+            struct Plain {
+                name: String,
+            }
+        });
+        let normalized: String = out.split_whitespace().collect();
+        // The Field literal carries `constraints: vec![]` (or its fully-qualified
+        // form). Either way, no Constraint:: variant should appear.
+        assert!(
+            !normalized.contains("Constraint::Min")
+                && !normalized.contains("Constraint::Max")
+                && !normalized.contains("Constraint::Length")
+                && !normalized.contains("Constraint::Pattern")
+                && !normalized.contains("Constraint::Email")
+                && !normalized.contains("Constraint::Url")
+                && !normalized.contains("Constraint::Custom"),
+            "expected no Constraint:: variants in emitted tokens, got: {out}"
+        );
+        assert!(
+            normalized.contains("constraints:::std::vec![]")
+                || normalized.contains("constraints:vec![]"),
+            "expected `constraints: vec![]` in emitted Field, got: {out}"
+        );
+    }
+
+    #[test]
+    fn enum_struct_variant_field_emits_constraints() {
+        let out = emit(quote! {
+            enum Event {
+                Signup {
+                    #[taut(email)]
+                    email: String,
+                },
+            }
+        });
+        let normalized: String = out.split_whitespace().collect();
+        assert!(
+            normalized.contains("Constraint::Email"),
+            "expected Constraint::Email literal on struct-variant field, got: {out}"
+        );
+    }
+
+    #[test]
+    fn enum_tuple_variant_does_not_emit_constraints() {
+        // Tuple-variant elements have no field name, so the IR carries no
+        // per-field constraints. Verify no `Constraint::<Variant>` literal
+        // leaks into the emitted token stream.
+        let out = emit(quote! {
+            enum Payload {
+                Number(i32),
+                Text(String),
+            }
+        });
+        let normalized: String = out.split_whitespace().collect();
+        assert!(
+            !normalized.contains("Constraint::Min")
+                && !normalized.contains("Constraint::Max")
+                && !normalized.contains("Constraint::Length")
+                && !normalized.contains("Constraint::Pattern")
+                && !normalized.contains("Constraint::Email")
+                && !normalized.contains("Constraint::Url")
+                && !normalized.contains("Constraint::Custom"),
+            "tuple variants must not emit Constraint:: variants, got: {out}"
+        );
     }
 }

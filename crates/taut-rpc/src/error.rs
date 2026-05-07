@@ -32,6 +32,8 @@
 
 use serde::Serialize;
 
+use crate::validate::ValidationError;
+
 /// Procedure-level error type. Implementations give every variant a stable string `code`
 /// and a `Serialize` payload that ends up in the JSON wire format as
 /// `{ "err": { "code": "...", "payload": ... } }`.
@@ -55,7 +57,7 @@ use serde::Serialize;
 /// For errors that map cleanly onto common HTTP semantics, prefer the built-in
 /// [`StandardError`] taxonomy.
 pub trait TautError: Serialize + Sized {
-    /// Stable, machine-readable code. SHOULD be lowercase snake_case.
+    /// Stable, machine-readable code. SHOULD be lowercase `snake_case`.
     fn code(&self) -> &'static str;
 
     /// HTTP status code this error maps to. Default `400`.
@@ -72,6 +74,7 @@ pub trait TautError: Serialize + Sized {
 /// | Variant                | Code                    | HTTP |
 /// |------------------------|-------------------------|------|
 /// | `BadRequest`           | `bad_request`           | 400  |
+/// | `ValidationFailed`     | `validation_error`      | 400  |
 /// | `Unauthenticated`      | `unauthenticated`       | 401  |
 /// | `Forbidden`            | `forbidden`             | 403  |
 /// | `NotFound`             | `not_found`             | 404  |
@@ -81,6 +84,11 @@ pub trait TautError: Serialize + Sized {
 /// | `Internal`             | `internal`              | 500  |
 /// | `ServiceUnavailable`   | `service_unavailable`   | 503  |
 /// | `Timeout`              | `timeout`               | 504  |
+///
+/// Note: `ValidationFailed` carries a list of [`ValidationError`] entries and
+/// is emitted by the server router when input validation rejects a request
+/// before the procedure runs. Its discriminant is `validation_error` (not
+/// `validation_failed`) to match the wire contract.
 ///
 /// # Design principle
 ///
@@ -99,6 +107,12 @@ pub enum StandardError {
     /// 400 — Malformed or syntactically invalid request.
     #[error("bad request: {message}")]
     BadRequest { message: String },
+    /// 400 — Server-side input validation rejected the request before the
+    /// procedure ran. Carries the per-field failures that the validator
+    /// collected. Serializes with the `validation_error` discriminant.
+    #[error("validation failed")]
+    #[serde(rename = "validation_error")]
+    ValidationFailed { errors: Vec<ValidationError> },
     /// 401 — Caller is not authenticated.
     #[error("unauthenticated")]
     Unauthenticated,
@@ -132,6 +146,7 @@ impl TautError for StandardError {
     fn code(&self) -> &'static str {
         match self {
             Self::BadRequest { .. } => "bad_request",
+            Self::ValidationFailed { .. } => "validation_error",
             Self::Unauthenticated => "unauthenticated",
             Self::Forbidden { .. } => "forbidden",
             Self::NotFound => "not_found",
@@ -147,6 +162,7 @@ impl TautError for StandardError {
     fn http_status(&self) -> u16 {
         match self {
             Self::BadRequest { .. } => 400,
+            Self::ValidationFailed { .. } => 400,
             Self::Unauthenticated => 401,
             Self::Forbidden { .. } => 403,
             Self::NotFound => 404,
@@ -172,10 +188,7 @@ mod tests {
     #[test]
     fn code_forbidden() {
         assert_eq!(
-            StandardError::Forbidden {
-                reason: "x".into()
-            }
-            .code(),
+            StandardError::Forbidden { reason: "x".into() }.code(),
             "forbidden"
         );
     }
@@ -209,10 +222,7 @@ mod tests {
     #[test]
     fn http_status_forbidden() {
         assert_eq!(
-            StandardError::Forbidden {
-                reason: "x".into()
-            }
-            .http_status(),
+            StandardError::Forbidden { reason: "x".into() }.http_status(),
             403
         );
     }
@@ -365,6 +375,54 @@ mod tests {
         assert!(
             json.contains("\"message\":\"x\""),
             "expected payload message in {json}"
+        );
+    }
+
+    #[test]
+    fn code_validation_failed() {
+        assert_eq!(
+            StandardError::ValidationFailed { errors: vec![] }.code(),
+            "validation_error"
+        );
+    }
+
+    #[test]
+    fn http_status_validation_failed() {
+        assert_eq!(
+            StandardError::ValidationFailed { errors: vec![] }.http_status(),
+            400
+        );
+    }
+
+    #[test]
+    fn serialize_validation_failed_with_errors() {
+        let err = StandardError::ValidationFailed {
+            errors: vec![ValidationError {
+                path: "name".into(),
+                constraint: "length".into(),
+                message: "too short".into(),
+            }],
+        };
+        let json = serde_json::to_string(&err).expect("serialize StandardError");
+        assert!(
+            json.contains("\"code\":\"validation_error\""),
+            "expected code field in {json}"
+        );
+        assert!(
+            json.contains("\"errors\":[{"),
+            "expected errors array in {json}"
+        );
+        assert!(
+            json.contains("\"path\":\"name\""),
+            "expected path in {json}"
+        );
+        assert!(
+            json.contains("\"constraint\":\"length\""),
+            "expected constraint in {json}"
+        );
+        assert!(
+            json.contains("\"message\":\"too short\""),
+            "expected message in {json}"
         );
     }
 }

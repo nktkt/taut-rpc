@@ -15,10 +15,26 @@
  *
  * Subscriptions (SPEC §4.2) are NOT handled here — they live in `sse.ts`.
  * Calling `subscribe()` on this transport throws `TautError("invalid_kind", ...)`.
+ *
+ * Validation (SPEC §7) is performed by `createClient`'s proxy, NOT by this
+ * transport. The transport sees inputs after schema parse and returns outputs
+ * that the proxy will then schema-parse before resolving the caller's
+ * Promise. This keeps custom transports trivial to implement.
  */
 
 import type { ProcedureKind, Transport } from "./index.js";
 
+/**
+ * RPC-level error thrown by the typed client.
+ *
+ * The shape of `payload` depends on `code`. For taut-rpc's built-in codes:
+ * - `"decode_error"`:  payload = `{ message: string }`
+ * - `"not_found"`:     payload = `{ procedure: string }`
+ * - `"validation_error"`:
+ *     payload = `{ errors: { path: string; constraint: string; message: string }[] }`
+ *
+ * Other codes are user-defined per the procedure's error type.
+ */
 export class TautError<C extends string = string, P = unknown> extends Error {
   constructor(public readonly code: C, public readonly payload: P, public readonly httpStatus: number) {
     super(`${code}: ${typeof payload === "string" ? payload : JSON.stringify(payload)}`);

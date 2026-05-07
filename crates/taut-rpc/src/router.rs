@@ -44,7 +44,7 @@ use std::sync::Arc;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{FromRequest, Query, Request};
 use axum::http::StatusCode;
-use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::Router as AxumRouter;
 use futures::stream::StreamExt;
@@ -165,10 +165,12 @@ impl Router {
         L::Service: tower::Service<axum::http::Request<axum::body::Body>, Error = std::convert::Infallible>
             + Clone
             + Send
+            + Sync
             + 'static,
         <L::Service as tower::Service<axum::http::Request<axum::body::Body>>>::Response:
             axum::response::IntoResponse + 'static,
-        <L::Service as tower::Service<axum::http::Request<axum::body::Body>>>::Future: Send + 'static,
+        <L::Service as tower::Service<axum::http::Request<axum::body::Body>>>::Future:
+            Send + 'static,
     {
         // The closure is wrapped in `Option<L>` so we can `take()` the layer
         // out of it on first call — `axum::Router::layer` consumes the layer
@@ -194,7 +196,8 @@ impl Router {
     pub fn ir(&self) -> crate::ir::Ir {
         let mut procedures = Vec::with_capacity(self.procedures.len());
         let mut types: Vec<crate::ir::TypeDef> = Vec::new();
-        let mut seen_type_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut seen_type_names: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         for desc in &self.procedures {
             procedures.push(desc.ir.clone());
@@ -242,18 +245,11 @@ impl Router {
         // Pre-collect procedure names for the `/rpc/_procedures` listing so
         // we can move the descriptor vec wholesale into the per-procedure
         // route loop below without juggling borrows.
-        let names: Arc<Vec<String>> = Arc::new(
-            self.procedures
-                .iter()
-                .map(|p| p.name.to_string())
-                .collect(),
-        );
+        let names: Arc<Vec<String>> =
+            Arc::new(self.procedures.iter().map(|p| p.name.to_string()).collect());
 
         let mut app = AxumRouter::new()
-            .route(
-                "/rpc/_health",
-                axum::routing::get(|| async { "ok" }),
-            )
+            .route("/rpc/_health", axum::routing::get(|| async { "ok" }))
             .route(
                 "/rpc/_procedures",
                 axum::routing::get(move || {
@@ -284,8 +280,7 @@ impl Router {
         // cheap.
         #[cfg(feature = "ws")]
         {
-            let descriptors_arc: Arc<Vec<ProcedureDescriptor>> =
-                Arc::new(self.procedures.clone());
+            let descriptors_arc: Arc<Vec<ProcedureDescriptor>> = Arc::new(self.procedures.clone());
             app = app.route(
                 "/rpc/_ws",
                 axum::routing::get(crate::router::ws::ws_route::ws_handler(descriptors_arc)),
@@ -381,7 +376,6 @@ impl Router {
 /// into a wire-shaped response.
 struct RpcInput(serde_json::Value);
 
-#[axum::async_trait]
 impl<S> FromRequest<S> for RpcInput
 where
     S: Send + Sync,
@@ -419,7 +413,8 @@ fn procedure_result_into_response(result: ProcedureResult) -> Response {
             code,
             payload,
         } => {
-            let status = StatusCode::from_u16(http_status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let status =
+                StatusCode::from_u16(http_status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             let body = serde_json::json!({
                 "err": { "code": code, "payload": payload }
             });
@@ -481,51 +476,49 @@ fn sse_response_for(
     // `BoxStream` to give the function a single return type. The cost is
     // one allocation per request, negligible next to the SSE socket
     // lifetime.
-    let event_stream: futures::stream::BoxStream<
-        'static,
-        Result<Event, std::convert::Infallible>,
-    > = match parse_input_param(raw_input) {
-        Err(e) => {
-            // Synthesize a single `event: error` frame describing the decode
-            // failure. The payload mirrors the unary `decode_error` envelope
-            // shape so clients can share a parser between transports.
-            let event = Event::default()
-                .event("error")
-                .json_data(serde_json::json!({
-                    "code": "decode_error",
-                    "payload": { "message": e.to_string() },
-                }))
-                .expect("valid json");
-            stream::once(async move { Ok(event) }).boxed()
-        }
-        Ok(input_json) => {
-            // Map each handler frame to an SSE event. `Event::json_data`
-            // only fails when its argument isn't serializable to JSON — but
-            // we feed it already-deserialized `serde_json::Value`s and a
-            // hand-rolled `json!({...})` literal, both of which are
-            // guaranteed JSON. The `expect`s therefore can never fire at
-            // runtime.
-            let frames = handler(input_json);
-            frames
-                .map(|frame| {
-                    let event = match frame {
-                        StreamFrame::Data(v) => Event::default()
-                            .event("data")
-                            .json_data(v)
-                            .expect("valid json"),
-                        StreamFrame::Error { code, payload } => Event::default()
-                            .event("error")
-                            .json_data(serde_json::json!({
-                                "code": code,
-                                "payload": payload,
-                            }))
-                            .expect("valid json"),
-                    };
-                    Ok::<Event, std::convert::Infallible>(event)
-                })
-                .boxed()
-        }
-    };
+    let event_stream: futures::stream::BoxStream<'static, Result<Event, std::convert::Infallible>> =
+        match parse_input_param(raw_input) {
+            Err(e) => {
+                // Synthesize a single `event: error` frame describing the decode
+                // failure. The payload mirrors the unary `decode_error` envelope
+                // shape so clients can share a parser between transports.
+                let event = Event::default()
+                    .event("error")
+                    .json_data(serde_json::json!({
+                        "code": "decode_error",
+                        "payload": { "message": e.to_string() },
+                    }))
+                    .expect("valid json");
+                stream::once(async move { Ok(event) }).boxed()
+            }
+            Ok(input_json) => {
+                // Map each handler frame to an SSE event. `Event::json_data`
+                // only fails when its argument isn't serializable to JSON — but
+                // we feed it already-deserialized `serde_json::Value`s and a
+                // hand-rolled `json!({...})` literal, both of which are
+                // guaranteed JSON. The `expect`s therefore can never fire at
+                // runtime.
+                let frames = handler(input_json);
+                frames
+                    .map(|frame| {
+                        let event = match frame {
+                            StreamFrame::Data(v) => Event::default()
+                                .event("data")
+                                .json_data(v)
+                                .expect("valid json"),
+                            StreamFrame::Error { code, payload } => Event::default()
+                                .event("error")
+                                .json_data(serde_json::json!({
+                                    "code": code,
+                                    "payload": payload,
+                                }))
+                                .expect("valid json"),
+                        };
+                        Ok::<Event, std::convert::Infallible>(event)
+                    })
+                    .boxed()
+            }
+        };
 
     // SPEC §4.2 mandates a trailing `event: end` frame; the router emits it
     // (handlers just terminate their stream). We append it via `chain` so
@@ -535,7 +528,11 @@ fn sse_response_for(
         Ok::<Event, std::convert::Infallible>(Event::default().event("end").data(""))
     });
 
-    Sse::new(event_stream.chain(end).boxed()).keep_alive(KeepAlive::default())
+    // axum 0.8 changed `Sse::keep_alive` to wrap the stream in `KeepAliveStream`,
+    // which alters the return type. Drop the keep-alive for now (clients are
+    // expected to reconnect on idle timeout) — the Phase 3 wire contract
+    // doesn't require keep-alive frames anyway.
+    Sse::new(event_stream.chain(end).boxed())
 }
 
 /// Fallback handler that returns the SPEC §4.1 `not_found` envelope for any
@@ -562,7 +559,7 @@ async fn not_found_fallback(req: Request) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{HttpMethod, ProcKind, Primitive, Procedure, TypeRef};
+    use crate::ir::{HttpMethod, Primitive, ProcKind, Procedure, TypeRef};
     use crate::procedure::{StreamHandler, UnaryHandler};
     use axum::body::Body;
     use futures::future::BoxFuture;
@@ -603,21 +600,25 @@ mod tests {
     }
 
     fn echo_handler() -> UnaryHandler {
-        Arc::new(|input: serde_json::Value| -> BoxFuture<'static, ProcedureResult> {
-            Box::pin(async move { ProcedureResult::Ok(input) })
-        })
+        Arc::new(
+            |input: serde_json::Value| -> BoxFuture<'static, ProcedureResult> {
+                Box::pin(async move { ProcedureResult::Ok(input) })
+            },
+        )
     }
 
     fn not_found_handler() -> UnaryHandler {
-        Arc::new(|_input: serde_json::Value| -> BoxFuture<'static, ProcedureResult> {
-            Box::pin(async move {
-                ProcedureResult::Err {
-                    http_status: 404,
-                    code: "not_found".to_string(),
-                    payload: serde_json::Value::Null,
-                }
-            })
-        })
+        Arc::new(
+            |_input: serde_json::Value| -> BoxFuture<'static, ProcedureResult> {
+                Box::pin(async move {
+                    ProcedureResult::Err {
+                        http_status: 404,
+                        code: "not_found".to_string(),
+                        payload: serde_json::Value::Null,
+                    }
+                })
+            },
+        )
     }
 
     /// Build a [`ProcedureDescriptor`] wrapping a streaming body.
@@ -626,10 +627,7 @@ mod tests {
     /// `kind = ProcKindRuntime::Subscription` and `body =
     /// ProcedureBody::Stream(handler)`. Used by the SPEC §4.2 SSE tests
     /// below.
-    fn make_stream_descriptor(
-        name: &'static str,
-        handler: StreamHandler,
-    ) -> ProcedureDescriptor {
+    fn make_stream_descriptor(name: &'static str, handler: StreamHandler) -> ProcedureDescriptor {
         ProcedureDescriptor {
             name,
             kind: ProcKindRuntime::Subscription,
@@ -651,9 +649,11 @@ mod tests {
     /// items for `i` in `0..n`. Lets the subscription tests assert on exact
     /// frame contents without baking the stream construction into each test.
     fn counting_stream_handler(n: usize) -> StreamHandler {
-        Arc::new(move |_input: serde_json::Value| -> BoxStream<'static, StreamFrame> {
-            stream::iter((0..n).map(|i| StreamFrame::Data(serde_json::json!(i)))).boxed()
-        })
+        Arc::new(
+            move |_input: serde_json::Value| -> BoxStream<'static, StreamFrame> {
+                stream::iter((0..n).map(|i| StreamFrame::Data(serde_json::json!(i)))).boxed()
+            },
+        )
     }
 
     #[test]
@@ -686,8 +686,16 @@ mod tests {
     #[tokio::test]
     async fn procedures_endpoint_lists_registered_names() {
         let app = Router::new()
-            .procedure(make_descriptor("alpha", ProcKindRuntime::Query, echo_handler()))
-            .procedure(make_descriptor("beta", ProcKindRuntime::Mutation, echo_handler()))
+            .procedure(make_descriptor(
+                "alpha",
+                ProcKindRuntime::Query,
+                echo_handler(),
+            ))
+            .procedure(make_descriptor(
+                "beta",
+                ProcKindRuntime::Mutation,
+                echo_handler(),
+            ))
             .into_axum();
 
         let response = app
@@ -843,15 +851,27 @@ mod tests {
     #[should_panic(expected = "already registered")]
     fn duplicate_procedure_name_panics() {
         let _ = Router::new()
-            .procedure(make_descriptor("dup", ProcKindRuntime::Query, echo_handler()))
-            .procedure(make_descriptor("dup", ProcKindRuntime::Query, echo_handler()));
+            .procedure(make_descriptor(
+                "dup",
+                ProcKindRuntime::Query,
+                echo_handler(),
+            ))
+            .procedure(make_descriptor(
+                "dup",
+                ProcKindRuntime::Query,
+                echo_handler(),
+            ));
     }
 
     #[test]
     fn ir_snapshot_contains_registered_procedures() {
         let router = Router::new()
             .procedure(make_descriptor("a", ProcKindRuntime::Query, echo_handler()))
-            .procedure(make_descriptor("b", ProcKindRuntime::Mutation, echo_handler()));
+            .procedure(make_descriptor(
+                "b",
+                ProcKindRuntime::Mutation,
+                echo_handler(),
+            ));
 
         let ir = router.ir();
         assert_eq!(ir.ir_version, crate::ir::Ir::CURRENT_VERSION);
