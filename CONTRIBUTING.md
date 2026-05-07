@@ -52,7 +52,7 @@ Anything outside these directories should be small (CI config, license files, to
 
 You need both a Rust and a Node toolchain:
 
-- **Rust 1.75+** via [rustup](https://rustup.rs), stable toolchain. We do not use nightly features.
+- **Rust 1.85+** via [rustup](https://rustup.rs), stable toolchain. We do not use nightly features.
 - **Node 20+** for the npm package. Older Node may work but is not tested.
 
 Recommended tools (the first two are now used in CI; install them locally to mirror it):

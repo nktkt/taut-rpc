@@ -13,7 +13,7 @@ Everything else in this guide is filling in that loop with real code.
 
 You will need:
 
-- **Rust 1.75 or newer.** `rustup update stable` if you are unsure.
+- **Rust 1.85 or newer.** `rustup update stable` if you are unsure.
 - **Node 20 or newer.** Older Node lacks the `ReadableStream` async
   iterator we rely on for subscriptions.
 - **Cargo** (ships with Rust) and **npm** (ships with Node).

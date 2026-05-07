@@ -13,7 +13,7 @@ exclude = [
 
 [workspace.package]
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/nktkt/taut-rpc"
 authors = ["taut-rpc contributors"]

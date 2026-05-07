@@ -137,7 +137,8 @@ pub(crate) mod ws_route {
                                 }
                             }
                         }))
-                        .unwrap().into(),
+                        .unwrap()
+                        .into(),
                     ));
                     continue;
                 }
@@ -166,14 +167,16 @@ pub(crate) mod ws_route {
                                     }
                                 }
                             }))
-                            .unwrap().into(),
+                            .unwrap()
+                            .into(),
                         ));
                         let _ = frame_tx.send(Message::Text(
                             serde_json::to_string(&serde_json::json!({
                                 "type": "end",
                                 "payload": { "id": id }
                             }))
-                            .unwrap().into(),
+                            .unwrap()
+                            .into(),
                         ));
                         continue;
                     };
@@ -204,14 +207,16 @@ pub(crate) mod ws_route {
                                         }
                                     }
                                 }))
-                                .unwrap().into(),
+                                .unwrap()
+                                .into(),
                             ));
                             let _ = frame_tx.send(Message::Text(
                                 serde_json::to_string(&serde_json::json!({
                                     "type": "end",
                                     "payload": { "id": id }
                                 }))
-                                .unwrap().into(),
+                                .unwrap()
+                                .into(),
                             ));
                             continue;
                         }
@@ -246,7 +251,9 @@ pub(crate) mod ws_route {
                                 }),
                             };
                             if frame_tx
-                                .send(Message::Text(serde_json::to_string(&envelope).unwrap().into()))
+                                .send(Message::Text(
+                                    serde_json::to_string(&envelope).unwrap().into(),
+                                ))
                                 .is_err()
                             {
                                 // Writer is gone (socket closed); abandon the
@@ -267,7 +274,8 @@ pub(crate) mod ws_route {
                                 "type": "end",
                                 "payload": { "id": id }
                             }))
-                            .unwrap().into(),
+                            .unwrap()
+                            .into(),
                         ));
                     });
                 }

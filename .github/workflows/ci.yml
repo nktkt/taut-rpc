@@ -69,13 +69,13 @@ jobs:
       - run: cargo test --workspace --features ws
 
   rust-msrv:
-    name: msrv (1.75)
+    name: msrv (1.85)
     runs-on: ubuntu-latest
     # Make this required once Phase 1 lands.
     continue-on-error: true
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@1.75
+      - uses: dtolnay/rust-toolchain@1.85
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace
 
