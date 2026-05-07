@@ -26,16 +26,23 @@ Each entry below MUST note an IR or wire bump if one happened.
 <!-- placeholder for post-0.1.0 changes -->
 
 ### Changed
-<!-- placeholder -->
+- CI: bumped `actions/checkout` v4 → v6 and `actions/setup-node` v4 → v6 in
+  the workflow files that were still on the older majors. Dependabot continues
+  to track weekly bumps for the rest.
 
 ### Deprecated
-<!-- placeholder -->
+- GitHub Actions are still using `actions/upload-artifact@v4`,
+  `actions/upload-pages-artifact@v3`, `actions/deploy-pages@v4`, and
+  `peaceiris/actions-mdbook@v2`, all of which run on Node.js 20. Node 20 is
+  scheduled for forced migration on 2026-09-16 and full removal shortly after.
+  Tracking via Dependabot — no action needed unless upstream releases lag.
 
 ### Removed
 <!-- placeholder -->
 
 ### Fixed
-<!-- placeholder -->
+- `docs/book.toml`: dropped the deprecated `multilingual` key (rejected by
+  current mdBook). Docs site now builds and deploys to GitHub Pages on push.
 
 ### IR
 <!-- placeholder; add a row to SPEC §9.1 if IR_VERSION bumps -->
