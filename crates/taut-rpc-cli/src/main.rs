@@ -15,6 +15,7 @@
 //! - [`Cmd::Gen`]      — Phase 1: read the IR, emit `api.gen.ts`.
 //! - [`Cmd::Check`]    — Phase 5: detect IR drift in CI.
 //! - [`Cmd::Inspect`]  — Phase 5: pretty-print the IR for humans.
+//! - [`Cmd::Mcp`]      — Beyond 0.1: emit an MCP `tools/list` manifest.
 //!
 //! See `SPEC.md` §2 for the macro/IR/codegen architecture.
 
@@ -23,6 +24,7 @@ use clap::{Parser, Subcommand};
 
 mod codegen;
 mod commands;
+mod mcp;
 
 /// `cargo taut` — codegen and IR tooling for `taut-rpc`.
 ///
@@ -54,6 +56,9 @@ enum Cmd {
 
     /// Inspect the IR as a human-readable table or JSON (Phase 5).
     Inspect(commands::inspect::InspectArgs),
+
+    /// Emit an MCP (Model Context Protocol) `tools/list` manifest.
+    Mcp(commands::mcp::McpArgs),
 }
 
 fn main() -> Result<()> {
@@ -70,5 +75,6 @@ fn main() -> Result<()> {
         Cmd::Gen(args) => commands::gen::run(args),
         Cmd::Check(args) => commands::check::run(args),
         Cmd::Inspect(args) => commands::inspect::run(args),
+        Cmd::Mcp(args) => commands::mcp::run(args),
     }
 }

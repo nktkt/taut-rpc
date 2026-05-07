@@ -19,6 +19,28 @@ Each entry below MUST note an IR or wire bump if one happened.
 
 ---
 
+## [Unreleased] — Agent tools
+
+### Added
+- `cargo taut mcp` subcommand emits an MCP (Model Context Protocol) `tools/list`
+  manifest from the IR. Each query/mutation procedure becomes a tool whose
+  `inputSchema` is JSON Schema (Draft 2020-12), with reachable named types
+  inlined as `$defs` and rustdoc surfaced as `description`. Subscriptions are
+  skipped by default; pass `--include-subscriptions` to include them.
+- `taut_rpc_cli::mcp` library module exposes `render_manifest(&Ir, &McpOptions)`
+  for in-process callers (integration tests, build scripts, custom tooling).
+- `--from-binary` flow mirrors `cargo taut gen` so the manifest can be produced
+  straight from a compiled binary via `taut_rpc::dump_if_requested`.
+
+### IR
+- IR_VERSION still 0. The MCP emitter is a pure consumer of the existing IR
+  shape — no field changes, no version bump.
+
+### Wire
+- No change.
+
+---
+
 ## [Unreleased] — Phase 3
 
 ### Added

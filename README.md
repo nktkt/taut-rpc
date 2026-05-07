@@ -57,6 +57,16 @@ const u = await client.getUser({ id: 1 });        // typed User
 for await (const e of client.userEvents()) { /* typed UserEvent */ }
 ```
 
+## Agent tooling
+
+`cargo taut mcp` emits a [Model Context Protocol](https://modelcontextprotocol.io/) `tools/list` manifest from the same IR that drives the TypeScript client. Each query/mutation procedure becomes an MCP tool whose `inputSchema` is JSON Schema (Draft 2020-12), with reachable named types inlined as `$defs` and rustdoc surfaced as `description`. Drop the resulting `mcp.json` into any MCP-aware agent harness to expose your taut-rpc service as a callable toolset — no hand-written schemas.
+
+```sh
+cargo taut mcp --out target/taut/mcp.json
+# or, dump straight from a built binary:
+cargo taut mcp --from-binary target/debug/my-server --out -
+```
+
 ## Building
 
 Nothing to build yet. Track progress in [`ROADMAP.md`](./ROADMAP.md) and read the design in [`SPEC.md`](./SPEC.md).

@@ -61,6 +61,9 @@ Target for the first stable release: **0.1.0**, scoped narrow on purpose. Anythi
 - CBOR / MessagePack transports.
 - A second backend adapter (`actix-web`? `salvo`?).
 - A "thin OpenAPI" emitter for teams that want a parallel REST surface.
+- [x] An MCP (Model Context Protocol) tools manifest emitter so a taut-rpc
+  service can be plugged into LLM agent harnesses without hand-writing
+  schemas. Shipped as `cargo taut mcp`.
 - Generic procedure support if a clean design emerges.
 - A devtools panel that taps the runtime and shows the call stream.
 
