@@ -79,10 +79,11 @@ fn state() -> &'static AppState {
 /// counter to the moon.
 #[derive(Serialize, Deserialize, Type, Validate)]
 pub struct IncrementInput {
-    /// Amount to add to the counter. Must be `1..=1000`. Surfaces as `bigint`
-    /// in TS because `u64` maps to `bigint` per SPEC §3.1.
+    /// Amount to add to the counter. Must be `1..=1000`. Uses `u32` because
+    /// `taut_rpc::validate::check::min`/`max` require `Into<f64>` which `u64`
+    /// can't satisfy losslessly.
     #[taut(min = 1, max = 1000)]
-    pub by: u64,
+    pub by: u32,
 }
 
 // --- procedures --------------------------------------------------------------
@@ -108,7 +109,7 @@ async fn current() -> u64 {
 async fn increment(input: IncrementInput) -> u64 {
     let s = state();
     let mut v = s.value.lock().await;
-    *v = v.saturating_add(input.by);
+    *v = v.saturating_add(u64::from(input.by));
     let new = *v;
     // `send` returns `Err` only when there are zero subscribers; that's the
     // common case before any client connects, so we ignore the result.

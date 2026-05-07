@@ -59,7 +59,7 @@ pub struct CreateTodoInput {
 /// `completed` rather than a "toggle" flag so the operation is idempotent —
 /// the React UI dispatches based on the current row state, and replaying the
 /// same request twice is a no-op.
-#[derive(Serialize, Deserialize, Type)]
+#[derive(Serialize, Deserialize, Type, Validate)]
 pub struct CompleteTodoInput {
     pub id: u32,
     pub completed: bool,
