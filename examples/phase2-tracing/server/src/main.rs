@@ -86,7 +86,7 @@ async fn echo(input: String) -> String {
 /// short-circuits to the standard `validation_error` envelope before
 /// `add`'s body runs, and the failed-request log line still nests under the
 /// `TraceLayer` span.
-#[derive(Serialize, Deserialize, Type, Validate)]
+#[derive(Serialize, Deserialize, Type, Validate, Debug)]
 pub struct AddInput {
     /// 0..=1000; demonstrates `min`/`max` on `i32`.
     #[taut(min = 0, max = 1000)]

@@ -43,10 +43,10 @@ pub struct TicksInput {
     /// client; codegen surfaces this as `bigint` since u64 maps to bigint
     /// per SPEC §3.1.
     #[taut(min = 1, max = 100)]
-    pub count: u64,
+    pub count: u32,
     /// Milliseconds to wait between values. Defaults to 1000 in the demo.
     #[taut(min = 10, max = 60_000)]
-    pub interval_ms: u64,
+    pub interval_ms: u32,
 }
 
 /// The headline subscription: emits `0..input.count`, sleeping `interval_ms`
@@ -59,8 +59,8 @@ pub struct TicksInput {
 #[rpc(stream)]
 async fn ticks(input: TicksInput) -> impl futures::Stream<Item = u64> + Send + 'static {
     async_stream::stream! {
-        let interval = std::time::Duration::from_millis(input.interval_ms);
-        for i in 0..input.count {
+        let interval = std::time::Duration::from_millis(u64::from(input.interval_ms));
+        for i in 0..u64::from(input.count) {
             if i > 0 {
                 tokio::time::sleep(interval).await;
             }
